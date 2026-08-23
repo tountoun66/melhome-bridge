@@ -5,6 +5,7 @@ const PORT = process.env.PORT || 3000;
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 
+// Journalisation détaillée
 app.use((req, res, next) => {
     console.log(`[${req.method}] ${req.url}`, { body: req.body, query: req.query });
     next();
@@ -47,7 +48,7 @@ app.get('/oauth/auth', (req, res) => {
     `);
 });
 
-// 2. Traitement direct et redirection vers Google
+// 2. Traitement et redirection vers Google
 app.post('/oauth/login', (req, res) => {
     const { redirect_uri, state } = req.body;
 
@@ -62,9 +63,14 @@ app.post('/oauth/login', (req, res) => {
     res.redirect(targetUrl);
 });
 
-// 3. Token URL
+// 3. Token URL (Strictement configuré avec les en-têtes anti-cache requis par Google)
 app.all('/oauth/token', (req, res) => {
-    console.log("=== REQUÊTE TOKEN REÇUE ===", req.body, req.query);
+    console.log("=== REQUÊTE TOKEN REÇUE DE GOOGLE ===", { body: req.body, query: req.query });
+
+    // Google exige impérativement ces en-têtes pour les réponses OAuth
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('Pragma', 'no-cache');
+
     res.status(200).json({
         access_token: "melhome_access_token_xyz",
         token_type: "Bearer",
@@ -73,7 +79,7 @@ app.all('/oauth/token', (req, res) => {
     });
 });
 
-// 4. Fulfillment
+// 4. Fulfillment (Commandes Google Home)
 app.post('/fulfillment', (req, res) => {
     const body = req.body;
     console.log("Requête fulfillment reçue :", JSON.stringify(body, null, 2));
