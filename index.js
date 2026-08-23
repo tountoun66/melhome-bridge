@@ -231,7 +231,7 @@ app.post('/fulfillment', async (req, res) => {
                     const currentDeviceData = clims.find(c => (c.id || c.ID).toString() === climId);
                     if (!currentDeviceData) continue;
 
-                    // LE SECRET EST ICI : Le paquet partiel identique à votre capture d'écran !
+                    // LE PAQUET PARFAIT : Basé sur votre capture d'écran exacte
                     let payloadJson = {
                         power: null,
                         operationMode: null,
@@ -265,8 +265,7 @@ app.post('/fulfillment', async (req, res) => {
                             if (mode === "off") {
                                 payloadJson.power = false;
                             } else {
-                                // On ne force pas "power = true" pour que le paquet reste minimal, sauf si la clim était éteinte
-                                if (!isPoweredOn(currentDeviceData)) payloadJson.power = true;
+                                if (!isPoweredOn(currentDeviceData) && payloadJson.power === null) payloadJson.power = true;
                                 if (mode === "cool") payloadJson.operationMode = "Cool";
                                 if (mode === "heat") payloadJson.operationMode = "Heat";
                                 if (mode === "dry") payloadJson.operationMode = "Dry";
@@ -274,8 +273,9 @@ app.post('/fulfillment', async (req, res) => {
                                 if (mode === "auto") payloadJson.operationMode = "Automatic";
                             }
                         }
-                        if (exec.command === 'action.devices.commands.FanSpeed') {
-                            const targetSpeed = exec.params.fanSpeed; // "One", "Two", "Three"...
+                        // LA CORRECTION : "SetFanSpeed" (au lieu de FanSpeed)
+                        if (exec.command === 'action.devices.commands.SetFanSpeed') {
+                            const targetSpeed = exec.params.fanSpeed; // "One", "Two", "Auto"...
                             payloadJson.setFanSpeed = targetSpeed;
                             updatedStates.currentFanSpeedSetting = targetSpeed;
                         }
@@ -291,7 +291,7 @@ app.post('/fulfillment', async (req, res) => {
                             "X-Requested-With": "XMLHttpRequest",
                             "Accept": "application/json, text/plain, */*"
                         },
-                        body: JSON.stringify(payloadJson) // On n'envoie QUE ce qui est nécessaire !
+                        body: JSON.stringify(payloadJson)
                     });
 
                     responseCommands.push({
