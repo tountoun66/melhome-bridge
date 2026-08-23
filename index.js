@@ -1,6 +1,6 @@
 const express = require('express');
 const app = express();
-const PORT = process.env.PORT || 10000; // Forcé sur le port Render
+const PORT = process.env.PORT || 10000;
 
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
@@ -135,8 +135,6 @@ app.post('/fulfillment', async (req, res) => {
     const intent = body?.inputs?.[0]?.intent;
     const authHeader = req.headers.authorization;
 
-    console.log("=== WEBHOOK GOOGLE REÇU ===", intent);
-
     if (!authHeader) return res.status(401).send("Non autorisé");
     
     let userCookie = "";
@@ -235,8 +233,10 @@ app.post('/fulfillment', async (req, res) => {
             }
             return res.json({ requestId, payload: { commands: commands.map(c => ({ ids: c.devices.map(d => d.id), status: "SUCCESS" })) } });
         }
-    } sur catch (error) {
-    // Correction de syntaxe au cas où
-    console.error("Erreur d'exécution :", error);
-    return res.json({ requestId, payload: { errorCode: "hardError" } });
-}
+    } catch (error) {
+        console.error("Erreur d'exécution :", error);
+        return res.json({ requestId, payload: { errorCode: "hardError" } });
+    }
+});
+
+app.listen(PORT, () => console.log(`Serveur Bridge en ligne sur le port ${PORT}`));
