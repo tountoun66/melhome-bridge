@@ -1,6 +1,6 @@
 const express = require('express');
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 10000;
 
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
@@ -52,12 +52,6 @@ function getTemp(clim) {
     return (!isNaN(num) && num > 0 && num < 60) ? num : 20.0;
 }
 
-function getFanSpeed(clim) {
-    const val = getSetting(clim, ["setFanSpeed", "SetFanSpeed", "fanSpeed", "FanSpeed"]);
-    const num = parseInt(val, 10);
-    return (!isNaN(num) && num >= 0 && num <= 5) ? num : 0;
-}
-
 function getGoogleMode(clim) {
     if (!isPoweredOn(clim)) return "off"; 
     
@@ -91,6 +85,7 @@ async function fetchMelcloudDevices(cookie) {
     return (data.buildings && data.buildings.length > 0) ? (data.buildings[0].airToAirUnits || []) : [];
 }
 
+// Routes d'association
 app.post('/api/save-cookie', (req, res) => {
     const { cookie } = req.body;
     if (!cookie) return res.status(400).json({ error: "Cookie manquant" });
@@ -120,25 +115,35 @@ app.get('/oauth/auth', (req, res) => {
 app.post('/oauth/login', (req, res) => {
     const { pairCode, redirect_uri, state } = req.body;
     const userCookie = pairCodes[pairCode];
-    if (!userCookie) return res.send("Erreur : Code invalide.");
-    const authCode = "auth_" + pairCode + "_" + Math.random().toString(36).substr(2, 5);
+    if (!userCookie) return res.send("Erreur : Code invalide ou expiré.");
+
+    const authCode = "auth_" + Math.random().toString(36).substr(2, 9);
     pairCodes[authCode] = userCookie; 
-    res.redirect(`${redirect_uri}?code=${authCode}&state=${state || ''}`);
+    
+    const separator = redirect_uri.includes('?') ? '&' : '?';
+    res.redirect(`${redirect_uri}${separator}code=${authCode}&state=${state || ''}`);
 });
 
 app.all('/oauth/token', (req, res) => {
     const code = req.body.code || req.query.code;
     const userCookie = pairCodes[code];
-    if (!userCookie) return res.status(400).send("Code expiré");
+    if (!userCookie) return res.status(400).json({ error: "invalid_grant" });
+
     const accessToken = Buffer.from(userCookie).toString('base64');
     delete pairCodes[code]; 
-    res.json({ access_token: accessToken, token_type: "Bearer", expires_in: 31536000 });
+    
+    res.json({ 
+        access_token: accessToken, 
+        token_type: "Bearer", 
+        expires_in: 31536000 
+    });
 });
 
+// Fulfillment Google Smart Home
 app.post('/fulfillment', async (req, res) => {
     const body = req.body;
     const requestId = body?.requestId;
-    const intent = body?.inputs[0]?.intent;
+    const intent = body?.inputs?.[0]?.intent;
     const authHeader = req.headers.authorization;
 
     if (!authHeader) return res.status(401).send("Non autorisé");
@@ -156,29 +161,12 @@ app.post('/fulfillment', async (req, res) => {
             const googleDevices = clims.map(clim => ({
                 id: (clim.id || clim.ID).toString(),
                 type: "action.devices.types.THERMOSTAT",
-                traits: [
-                    "action.devices.traits.TemperatureSetting",
-                    "action.devices.traits.FanSpeed"
-                ],
+                traits: ["action.devices.traits.TemperatureSetting"],
                 name: { name: clim.givenDisplayName || clim.GivenDisplayName || "Climatiseur" },
                 willReportState: false,
                 attributes: { 
                     availableThermostatModes: "off,on,heat,cool,dry,fan-only,auto", 
-                    thermostatTemperatureUnit: "C",
-                    supportsFanSpeedPercent: false,
-                    // Attributs corrigés et complétés pour forcer Google à valider la ventilation :
-                    commandOnlyFanSpeed: false,
-                    availableFanSpeeds: {
-                        speeds: [
-                            { speed_name: "auto", speed_values: [{ lang_format: "en", speed_synonym: ["auto"] }, { lang_format: "fr", speed_synonym: ["automatique", "auto"] }] },
-                            { speed_name: "1", speed_values: [{ lang_format: "en", speed_synonym: ["speed 1", "one"] }, { lang_format: "fr", speed_synonym: ["vitesse 1", "un"] }] },
-                            { speed_name: "2", speed_values: [{ lang_format: "en", speed_synonym: ["speed 2", "two"] }, { lang_format: "fr", speed_synonym: ["vitesse 2", "deux"] }] },
-                            { speed_name: "3", speed_values: [{ lang_format: "en", speed_synonym: ["speed 3", "three"] }, { lang_format: "fr", speed_synonym: ["vitesse 3", "trois"] }] },
-                            { speed_name: "4", speed_values: [{ lang_format: "en", speed_synonym: ["speed 4", "four"] }, { lang_format: "fr", speed_synonym: ["vitesse 4", "quatre"] }] },
-                            { speed_name: "5", speed_values: [{ lang_format: "en", speed_synonym: ["speed 5", "five"] }, { lang_format: "fr", speed_synonym: ["vitesse 5", "cinq"] }] }
-                        ],
-                        ordered: true
-                    }
+                    thermostatTemperatureUnit: "C" 
                 }
             }));
             return res.json({ requestId, payload: { agentUserId: "melhome_user", devices: googleDevices } });
@@ -190,16 +178,12 @@ app.post('/fulfillment', async (req, res) => {
 
             clims.forEach(clim => {
                 const id = (clim.id || clim.ID).toString();
-                const fanVal = getFanSpeed(clim);
-                const fanName = fanVal === 0 ? "auto" : fanVal.toString();
-
                 devicesState[id] = {
                     online: true,
                     status: "SUCCESS",
                     thermostatMode: getGoogleMode(clim),
                     thermostatTemperatureSetpoint: getTemp(clim),
-                    thermostatTemperatureAmbient: getRoomTemp(clim),
-                    currentFanSpeedSetting: fanName
+                    thermostatTemperatureAmbient: getRoomTemp(clim)
                 };
             });
             
@@ -218,52 +202,31 @@ app.post('/fulfillment', async (req, res) => {
                     const currentDeviceData = clims.find(c => (c.id || c.ID).toString() === climId);
                     if (!currentDeviceData) continue;
 
-                    let jsonMap = JSON.parse(JSON.stringify(currentDeviceData)); 
+                    let payloadJson = { ...currentDeviceData }; 
                     
                     command.execution.forEach(exec => {
                         if (exec.command === 'action.devices.commands.OnOff') {
-                            jsonMap.power = exec.params.on;
+                            payloadJson.power = exec.params.on;
                         }
                         if (exec.command === 'action.devices.commands.ThermostatTemperatureSetpoint') {
-                            jsonMap.setTemperature = exec.params.thermostatTemperatureSetpoint;
+                            payloadJson.setTemperature = exec.params.thermostatTemperatureSetpoint;
                         }
                         if (exec.command === 'action.devices.commands.ThermostatSetMode') {
                             const mode = exec.params.thermostatMode;
                             if (mode === "off") {
-                                jsonMap.power = false;
+                                payloadJson.power = false;
                             } else {
-                                jsonMap.power = true;
-                                if (mode === "cool") jsonMap.operationMode = "Cool";
-                                if (mode === "heat") jsonMap.operationMode = "Heat";
-                                if (mode === "dry") jsonMap.operationMode = "Dry";
-                                if (mode === "fan-only") jsonMap.operationMode = "Fan";
-                                if (mode === "auto") jsonMap.operationMode = "Automatic";
+                                payloadJson.power = true;
+                                if (mode === "cool") payloadJson.operationMode = "Cool";
+                                if (mode === "heat") payloadJson.operationMode = "Heat";
+                                if (mode === "dry") payloadJson.operationMode = "Dry";
+                                if (mode === "fan-only") payloadJson.operationMode = "Fan";
+                                if (mode === "auto") payloadJson.operationMode = "Automatic";
                             }
-                        }
-                        // C'est ici que l'ordre de ventilation sera intercepté
-                        if (exec.command === 'action.devices.commands.FanSpeed') {
-                            const speedStr = exec.params.fanSpeed;
-                            const targetFan = (speedStr === "auto") ? 0 : parseInt(speedStr, 10);
-                            
-                            jsonMap.setFanSpeed = targetFan;
-                            
-                            ['settings', 'unitSettings'].forEach(containerKey => {
-                                if (Array.isArray(jsonMap[containerKey])) {
-                                    jsonMap[containerKey].forEach(item => {
-                                        const itemName = String(item.name || item.Name || "").toLowerCase();
-                                        if (itemName.includes("fanspeed")) {
-                                            item.value = targetFan;
-                                            item.Value = targetFan;
-                                        }
-                                    });
-                                }
-                            });
                         }
                     });
 
-                    console.log(`=== REQUÊTE VENTILATION/PUT (CLIM ${climId}) ===`, JSON.stringify(jsonMap));
-
-                    const mitsubishiResponse = await fetch(`https://melcloudhome.com/api/ataunit/${climId}`, {
+                    await fetch(`https://melcloudhome.com/api/ataunit/${climId}`, {
                         method: 'PUT',
                         headers: {
                             "Content-Type": "application/json; charset=utf-8",
@@ -273,21 +236,16 @@ app.post('/fulfillment', async (req, res) => {
                             "X-Requested-With": "XMLHttpRequest",
                             "Accept": "application/json, text/plain, */*"
                         },
-                        body: JSON.stringify(jsonMap)
+                        body: JSON.stringify(payloadJson)
                     });
-
-                    const responseText = await mitsubishiResponse.text();
-                    console.log(`=== RÉPONSE MITSUBISHI (Statut ${mitsubishiResponse.status}) ===`, responseText);
                 }
             }
             return res.json({ requestId, payload: { commands: commands.map(c => ({ ids: c.devices.map(d => d.id), status: "SUCCESS" })) } });
         }
     } catch (error) {
-        console.error("Erreur d'exécution MELCloud :", error);
+        console.error("Erreur d'exécution :", error);
         return res.json({ requestId, payload: { errorCode: "hardError" } });
     }
-
-    res.json({ requestId, payload: {} });
 });
 
 app.listen(PORT, () => console.log(`Serveur Bridge en ligne sur le port ${PORT}`));
