@@ -53,6 +53,13 @@ function getTemp(clim) {
     return (!isNaN(num) && num > 0 && num < 60) ? num : 20.0;
 }
 
+// Extraction de la vitesse de ventilation (0 = Auto, 1 à 5 = Vitesses)
+function getFanSpeed(clim) {
+    const val = getSetting(clim, ["setFanSpeed", "SetFanSpeed", "fanSpeed", "FanSpeed"]);
+    const num = parseInt(val, 10);
+    return (!isNaN(num) && num >= 0 && num <= 5) ? num : 0;
+}
+
 function getGoogleMode(clim) {
     if (!isPoweredOn(clim)) return "off"; 
     
@@ -149,42 +156,63 @@ app.post('/fulfillment', async (req, res) => {
     }
 
     try {
+        // SYNC : On ajoute le trait FanSpeed et ses attributs
         if (intent === 'action.devices.SYNC') {
             const clims = await fetchMelcloudDevices(userCookie);
             const googleDevices = clims.map(clim => ({
                 id: (clim.id || clim.ID).toString(),
                 type: "action.devices.types.THERMOSTAT",
                 traits: [
-                    "action.devices.traits.TemperatureSetting" 
+                    "action.devices.traits.TemperatureSetting",
+                    "action.devices.traits.FanSpeed" // <-- AJOUT DU TRAIT VENTILATION
                 ],
                 name: { name: clim.givenDisplayName || clim.GivenDisplayName || "Climatiseur" },
                 willReportState: false,
                 attributes: { 
                     availableThermostatModes: "off,on,heat,cool,dry,fan-only,auto", 
-                    thermostatTemperatureUnit: "C" 
+                    thermostatTemperatureUnit: "C",
+                    // Configuration des vitesses de ventilation pour Google (0 = Auto, 1 à 5)
+                    supportsFanSpeedPercent: false,
+                    availableFanSpeeds: {
+                        speeds: [
+                            { speed_name: "auto", speed_values: [{ lang_format: "en", speed_synonym: ["auto"] }, { lang_format: "fr", speed_synonym: ["automatique", "auto"] }] },
+                            { speed_name: "1", speed_values: [{ lang_format: "en", speed_synonym: ["speed 1", "one"] }, { lang_format: "fr", speed_synonym: ["vitesse 1", "un"] }] },
+                            { speed_name: "2", speed_values: [{ lang_format: "en", speed_synonym: ["speed 2", "two"] }, { lang_format: "fr", speed_synonym: ["vitesse 2", "deux"] }] },
+                            { speed_name: "3", speed_values: [{ lang_format: "en", speed_synonym: ["speed 3", "three"] }, { lang_format: "fr", speed_synonym: ["vitesse 3", "trois"] }] },
+                            { speed_name: "4", speed_values: [{ lang_format: "en", speed_synonym: ["speed 4", "four"] }, { lang_format: "fr", speed_synonym: ["vitesse 4", "quatre"] }] },
+                            { speed_name: "5", speed_values: [{ lang_format: "en", speed_synonym: ["speed 5", "five"] }, { lang_format: "fr", speed_synonym: ["vitesse 5", "cinq"] }] }
+                        ],
+                        ordered: true
+                    }
                 }
             }));
             return res.json({ requestId, payload: { agentUserId: "melhome_user", devices: googleDevices } });
         }
 
+        // QUERY : On transmet la vitesse actuelle du ventilateur à Google
         if (intent === 'action.devices.QUERY') {
             const clims = await fetchMelcloudDevices(userCookie);
             const devicesState = {};
 
             clims.forEach(clim => {
                 const id = (clim.id || clim.ID).toString();
+                const fanVal = getFanSpeed(clim);
+                const fanName = fanVal === 0 ? "auto" : fanVal.toString();
+
                 devicesState[id] = {
                     online: true,
                     status: "SUCCESS",
                     thermostatMode: getGoogleMode(clim),
                     thermostatTemperatureSetpoint: getTemp(clim),
-                    thermostatTemperatureAmbient: getRoomTemp(clim)
+                    thermostatTemperatureAmbient: getRoomTemp(clim),
+                    currentFanSpeedSetting: fanName // <-- ENVOI DE LA VITESSE ACTUELLE
                 };
             });
             
             return res.json({ requestId, payload: { devices: devicesState } });
         }
 
+        // EXECUTE : On intercepte les changements (Température, Mode ET Ventilation)
         if (intent === 'action.devices.EXECUTE') {
             const commands = body.inputs[0].payload.commands;
             const clims = await fetchMelcloudDevices(userCookie);
@@ -218,6 +246,11 @@ app.post('/fulfillment', async (req, res) => {
                                 if (mode === "fan-only") payloadJson.operationMode = "Fan";
                                 if (mode === "auto") payloadJson.operationMode = "Automatic";
                             }
+                        }
+                        // Gestion du changement de vitesse de ventilation depuis Google Home
+                        if (exec.command === 'action.devices.commands.FanSpeed') {
+                            const speedStr = exec.params.fanSpeed; // ex: "auto", "1", "2"...
+                            payloadJson.setFanSpeed = speedStr === "auto" ? 0 : parseInt(speedStr, 10);
                         }
                     });
 
