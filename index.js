@@ -53,6 +53,14 @@ function getTemp(clim) {
     return (!isNaN(num) && num > 0 && num < 60) ? num : 20.0;
 }
 
+// Extraction spécifique de la température extérieure
+function getOutdoorTemp(clim) {
+    const val = getSetting(clim, ["outdoorTemperature", "OutdoorTemperature", "externalTemperature", "ExternalTemperature"]);
+    const num = parseFloat(val);
+    // Si la valeur est valide (entre -50°C et +60°C), on la prend, sinon on renvoie null pour éviter d'afficher des bêtises
+    return (!isNaN(num) && num > -50 && num < 60) ? num : null;
+}
+
 function getGoogleMode(clim) {
     if (!isPoweredOn(clim)) return "off"; 
     
@@ -167,20 +175,29 @@ app.post('/fulfillment', async (req, res) => {
             return res.json({ requestId, payload: { agentUserId: "melhome_user", devices: googleDevices } });
         }
 
-        // C'ICI QUE LE NOM DE LA VARIABLE CHANGE : "thermostatTemperatureAmbient"
         if (intent === 'action.devices.QUERY') {
             const clims = await fetchMelcloudDevices(userCookie);
             const devicesState = {};
 
             clims.forEach(clim => {
                 const id = (clim.id || clim.ID).toString();
-                devicesState[id] = {
+                
+                // On prépare l'objet de base de l'état
+                const stateObj = {
                     online: true,
                     status: "SUCCESS",
                     thermostatMode: getGoogleMode(clim),
                     thermostatTemperatureSetpoint: getTemp(clim),
-                    thermostatTemperatureAmbient: getRoomTemp(clim) // <-- CORRIGÉ ICI !
+                    thermostatTemperatureAmbient: getRoomTemp(clim)
                 };
+
+                // On ajoute la température extérieure uniquement si Mitsubishi la transmet
+                const outdoor = getOutdoorTemp(clim);
+                if (outdoor !== null) {
+                    stateObj.thermostatOutdoorTemperature = outdoor;
+                }
+
+                devicesState[id] = stateObj;
             });
             
             console.log("=== ÉTAT ENVOYÉ À GOOGLE ===", JSON.stringify(devicesState, null, 2));
