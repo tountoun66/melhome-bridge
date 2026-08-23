@@ -2,109 +2,64 @@ const express = require('express');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 
-// Point d'entrée unique (Fulfillment) requis par Google Smart Home
-app.post('/fulfillment', async (req, res) => {
-    const body = req.body;
-    const requestId = body.requestId;
+// 1. Page de connexion (Authorization URL demandée par Google)
+app.get('/oauth/auth', (req, res) => {
+    const { client_id, redirect_uri, state, response_type } = req.query;
+    // Affiche une simple page pour que l'utilisateur saisie ses identifiants
+    res.send(`
+        <html>
+            <head><title>Connexion Melhome</title></head>
+            <body style="font-family: Arial; padding: 40px; text-align: center;">
+                <h2>Associer Melhome à Google Home</h2>
+                <form method="POST" action="/oauth/login">
+                    <input type="hidden" name="client_id" value="${client_id}" />
+                    <input type="hidden" name="redirect_uri" value="${redirect_uri}" />
+                    <input type="hidden" name="state" value="${state}" />
+                    <div style="margin: 10px;">
+                        <input type="email" name="email" placeholder="Email MELCloud Home" style="padding: 10px; width: 300px;" required />
+                    </div>
+                    <div style="margin: 10px;">
+                        <input type="password" name="password" placeholder="Mot de passe" style="padding: 10px; width: 300px;" required />
+                    </div>
+                    <button type="submit" style="padding: 10px 20px; background: #2196F3; color: white; border: none; cursor: pointer;">Se connecter et autoriser</button>
+                </form>
+            </body>
+        </html>
+    `);
+});
+
+// 2. Traitement de la connexion et redirection vers Google
+app.post('/oauth/login', (req, res) => {
+    const { redirect_uri, state, email, password } = req.body;
+    // TODO: Ici, valider l'email/mot de passe auprès de MELCloud Home si besoin
     
-    // Récupération de l'intention envoyée par Google (SYNC, QUERY, EXECUTE)
-    const input = body.inputs && body.inputs[0];
-    const intent = input && input.intent;
+    // On génère un code d'autorisation temporaire
+    const authCode = "melhome_auth_code_123";
+    res.redirect(`${redirect_uri}?code=${authCode}&state=${state}`);
+});
 
-    console.log(`Reçu intention Google Smart Home : ${intent}`);
-
-    let payload = {};
-
-    switch (intent) {
-        // ==========================================
-        // 1. SYNC : Liste des appareils de l'utilisateur
-        // ==========================================
-        case 'action.devices.SYNC':
-            // TODO: Récupérer les vrais appareils depuis MELCloud Home pour l'utilisateur connecté
-            payload = {
-                devices: [
-                    {
-                        id: 'clim_salon_123', // ID unique de l'appareil
-                        type: 'action.devices.types.AC_UNIT', // Type Google pour un climatiseur
-                        traits: [
-                            'action.devices.traits.OnOff',
-                            'action.devices.traits.TemperatureSetting'
-                        ],
-                        name: {
-                            defaultNames: ['Climatiseur Melhome'],
-                            name: 'Salon',
-                            nicknames: ['Salon', 'Clim salon']
-                        },
-                        willReportState: false,
-                        attributes: {
-                            availableThermostatModes: 'off,heat,cool,fan_only,auto',
-                            temperatureUnit: 'C'
-                        }
-                    }
-                ]
-            };
-            break;
-
-        // ==========================================
-        // 2. QUERY : État actuel des appareils
-        // ==========================================
-        case 'action.devices.QUERY':
-            // TODO: Interroger l'API MELCloud Home pour obtenir l'état réel de l'appareil
-            payload = {
-                devices: {
-                    'clim_salon_123': {
-                        on: true,
-                        online: true,
-                        thermostatMode: 'heat',
-                        thermostatTemperatureSetpoint: 21.0,
-                        thermostatAmbientTemperature: 19.5
-                    }
-                }
-            };
-            break;
-
-        // ==========================================
-        // 3. EXECUTE : Ordre de pilotage (Voix / App)
-        // ==========================================
-        case 'action.devices.EXECUTE':
-            const command = input.payload.commands[0];
-            const deviceIds = command.devices.map(d => d.id);
-            const execution = command.execution[0];
-            
-            const commandName = execution.command;
-            const params = execution.params;
-
-            console.log(`Commande reçue pour les appareils ${deviceIds} : ${commandName}`, params);
-
-            // TODO : Traduire cet ordre et l'envoyer à l'API de MELCloud Home via le jeton de l'utilisateur
-
-            payload = {
-                commands: [
-                    {
-                        ids: deviceIds,
-                        status: 'SUCCESS',
-                        states: {
-                            on: params.on !== undefined ? params.on : true,
-                            online: true
-                        }
-                    }
-                ]
-            };
-            break;
-
-        default:
-            return res.status(400).send({ error: `Intention non supportée : ${intent}` });
-    }
-
-    // Réponse au format exigé par Google
+// 3. Échange du code contre un jeton (Token URL demandée par Google)
+app.post('/oauth/token', (req, res) => {
     res.json({
-        requestId: requestId,
-        payload: payload
+        access_token: "melhome_access_token_xyz",
+        token_type: "Bearer",
+        expires_in: 3600,
+        refresh_token: "melhome_refresh_token_xyz"
+    });
+});
+
+// 4. Point de commande (Fulfillment pour Google Home)
+app.post('/fulfillment', (req, res) => {
+    const body = req.body;
+    res.json({
+        requestId: body.requestId,
+        payload: { devices: [] }
     });
 });
 
 app.listen(PORT, () => {
-    console.log(`Serveur Cloud-to-Cloud Google Smart Home en écoute sur le port ${PORT}`);
+    console.log(`Serveur OAuth & Fulfillment en ligne sur le port ${PORT}`);
 });
