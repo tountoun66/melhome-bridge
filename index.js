@@ -5,24 +5,30 @@ const PORT = process.env.PORT || 3000;
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 
-// Middleware pour voir chaque requête dans les logs Render
+// Mémoire temporaire pour stocker les sessions OAuth en cours
+const oauthSessions = {};
+
+// Middleware de suivi des requêtes
 app.use((req, res, next) => {
     console.log(`[${req.method}] ${req.url}`, req.body, req.query);
     next();
 });
 
-// 1. Page de connexion (Demandée par Google Home)
+// 1. Page de connexion (Google arrive ici)
 app.get('/oauth/auth', (req, res) => {
     const { client_id, redirect_uri, state, response_type } = req.query;
+    
+    // On génère un identifiant de session unique pour stocker l'URL de Google
+    const sessionId = Math.random().toString(36.substring(2));
+    oauthSessions[sessionId] = { redirect_uri, state };
+
     res.send(`
         <html>
             <head><title>Connexion Melhome</title></head>
             <body style="font-family: Arial; padding: 40px; text-align: center;">
                 <h2>Associer Melhome à Google Home</h2>
                 <form method="POST" action="/oauth/login">
-                    <input type="hidden" name="client_id" value="${client_id || ''}" />
-                    <input type="hidden" name="redirect_uri" value="${redirect_uri || ''}" />
-                    <input type="hidden" name="state" value="${state || ''}" />
+                    <input type="hidden" name="session_id" value="${sessionId}" />
                     <div style="margin: 10px;">
                         <input type="email" name="email" placeholder="Email MELCloud Home" style="padding: 10px; width: 300px;" required />
                     </div>
@@ -36,19 +42,28 @@ app.get('/oauth/auth', (req, res) => {
     `);
 });
 
-// 2. Traitement de la connexion
+// 2. Validation et redirection propre vers Google
 app.post('/oauth/login', (req, res) => {
-    const { redirect_uri, state } = req.body;
-    const authCode = "melhome_auth_code_123";
-    if (redirect_uri) {
-        res.redirect(`${redirect_uri}?code=${authCode}&state=${state || ''}`);
-    } else {
-        res.status(400).send("Erreur : redirect_uri manquant");
+    const { session_id, email, password } = req.body;
+    const session = oauthSessions[session_id];
+
+    if (!session || !session.redirect_uri) {
+        return res.status(400).send("Erreur de session OAuth expirée ou invalide.");
     }
+
+    const authCode = "melhome_auth_code_123";
+    const targetUrl = `${session.redirect_uri}?code=${authCode}&state=${session.state || ''}`;
+    
+    // Nettoyage
+    delete oauthSessions[session_id];
+
+    console.log(`Redirection vers Google : ${targetUrl}`);
+    res.redirect(targetUrl);
 });
 
 // 3. Échange du code contre un jeton (Token URL)
 app.all('/oauth/token', (req, res) => {
+    console.log("Requête reçue sur /oauth/token avec les données :", req.body);
     res.json({
         access_token: "melhome_access_token_xyz",
         token_type: "Bearer",
@@ -67,5 +82,5 @@ app.post('/fulfillment', (req, res) => {
 });
 
 app.listen(PORT, () => {
-    console.log(`Serveur en ligne sur le port ${PORT}`);
+    console.log(`Serveur OAuth sécurisé en ligne sur le port ${PORT}`);
 });
