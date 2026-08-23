@@ -5,7 +5,6 @@ const PORT = process.env.PORT || 10000;
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 
-// Stockage persistant en mémoire des sessions associées à Google Home
 const pairCodes = {}; 
 
 function extractXsrf(cookieStr) {
@@ -97,7 +96,6 @@ app.post('/api/save-cookie', (req, res) => {
     if (!cookie) return res.status(400).json({ error: "Cookie manquant" });
     const pairCode = Math.floor(1000 + Math.random() * 9000).toString();
     pairCodes[pairCode] = cookie;
-    // On sauvegarde aussi dans une clé fixe "master_cookie" pour éviter la perte si Render redémarre
     pairCodes["master_cookie"] = cookie;
     res.json({ success: true, pairCode: pairCode });
 });
@@ -122,9 +120,9 @@ app.get('/oauth/auth', (req, res) => {
 
 app.post('/oauth/login', (req, res) => {
     const { pairCode, redirect_uri, state } = req.body;
-    let userCookie = pairCodes[pairCode] || pairCodes["master_cookie"]; // Fallback sur le master cookie si le code a expiré
+    let userCookie = pairCodes[pairCode] || pairCodes["master_cookie"];
     
-    if (!userCookie) return res.send("Erreur : Code invalide. Veuillez générer un nouveau code depuis l'application Android.");
+    if (!userCookie) return res.send("Erreur : Code invalide.");
 
     const authCode = "auth_" + Math.random().toString(36).substr(2, 9);
     pairCodes[authCode] = userCookie; 
@@ -140,12 +138,7 @@ app.all('/oauth/token', (req, res) => {
     if (!userCookie) return res.status(400).json({ error: "invalid_grant" });
 
     const accessToken = Buffer.from(userCookie).toString('base64');
-    
-    res.json({ 
-        access_token: accessToken, 
-        token_type: "Bearer", 
-        expires_in: 31536000 
-    });
+    res.json({ access_token: accessToken, token_type: "Bearer", expires_in: 31536000 });
 });
 
 app.post('/fulfillment', async (req, res) => {
@@ -160,7 +153,7 @@ app.post('/fulfillment', async (req, res) => {
     try {
         userCookie = Buffer.from(authHeader.split(' ')[1], 'base64').toString('utf-8');
     } catch(e) {
-        userCookie = pairCodes["master_cookie"] || ""; // Sécurité de secours absolue
+        userCookie = pairCodes["master_cookie"] || "";
     }
 
     if (!userCookie) return res.status(401).send("Jeton invalide");
@@ -184,12 +177,12 @@ app.post('/fulfillment', async (req, res) => {
                     commandOnlyFanSpeed: false,
                     availableFanSpeeds: {
                         speeds: [
-                            { speed_name: "auto", speed_values: [{ lang_format: "en", speed_synonym: ["auto"] }, { lang_format: "fr", speed_synonym: ["automatique", "auto"] }] },
-                            { speed_name: "1", speed_values: [{ lang_format: "en", speed_synonym: ["speed 1", "one"] }, { lang_format: "fr", speed_synonym: ["vitesse 1", "un"] }] },
-                            { speed_name: "2", speed_values: [{ lang_format: "en", speed_synonym: ["speed 2", "two"] }, { lang_format: "fr", speed_synonym: ["vitesse 2", "deux"] }] },
-                            { speed_name: "3", speed_values: [{ lang_format: "en", speed_synonym: ["speed 3", "three"] }, { lang_format: "fr", speed_synonym: ["vitesse 3", "trois"] }] },
-                            { speed_name: "4", speed_values: [{ lang_format: "en", speed_synonym: ["speed 4", "four"] }, { lang_format: "fr", speed_synonym: ["vitesse 4", "quatre"] }] },
-                            { speed_name: "5", speed_values: [{ lang_format: "en", speed_synonym: ["speed 5", "five"] }, { lang_format: "fr", speed_synonym: ["vitesse 5", "cinq"] }] }
+                            { speed_name: "s1", speed_values: [{ lang_format: "en", speed_synonym: ["speed 1", "one", "1"] }, { lang_format: "fr", speed_synonym: ["vitesse 1", "un", "1"] }] },
+                            { speed_name: "s2", speed_values: [{ lang_format: "en", speed_synonym: ["speed 2", "two", "2"] }, { lang_format: "fr", speed_synonym: ["vitesse 2", "deux", "2"] }] },
+                            { speed_name: "s3", speed_values: [{ lang_format: "en", speed_synonym: ["speed 3", "three", "3"] }, { lang_format: "fr", speed_synonym: ["vitesse 3", "trois", "3"] }] },
+                            { speed_name: "s4", speed_values: [{ lang_format: "en", speed_synonym: ["speed 4", "four", "4"] }, { lang_format: "fr", speed_synonym: ["vitesse 4", "quatre", "4"] }] },
+                            { speed_name: "s5", speed_values: [{ lang_format: "en", speed_synonym: ["speed 5", "five", "5"] }, { lang_format: "fr", speed_synonym: ["vitesse 5", "cinq", "5"] }] },
+                            { speed_name: "auto", speed_values: [{ lang_format: "en", speed_synonym: ["auto", "automatic"] }, { lang_format: "fr", speed_synonym: ["auto", "automatique"] }] }
                         ],
                         ordered: true
                     }
@@ -205,7 +198,8 @@ app.post('/fulfillment', async (req, res) => {
             clims.forEach(clim => {
                 const id = (clim.id || clim.ID).toString();
                 const fanVal = getFanSpeed(clim);
-                const fanName = fanVal === 0 ? "auto" : fanVal.toString();
+                // On mappe le chiffre vers le nom de vitesse déclaré dans SYNC
+                const fanName = (fanVal === 0 || fanVal === null) ? "auto" : `s${fanVal}`;
 
                 devicesState[id] = {
                     online: true,
@@ -254,10 +248,14 @@ app.post('/fulfillment', async (req, res) => {
                                 if (mode === "auto") payloadJson.operationMode = "Automatic";
                             }
                         }
+                        // Traduction de "s1", "s2"... ou "auto" vers le chiffre ou format attendu par Mitsubishi
                         if (exec.command === 'action.devices.commands.FanSpeed') {
-                            const speedStr = exec.params.fanSpeed;
-                            const targetFan = (speedStr === "auto") ? 0 : parseInt(speedStr, 10);
-                            
+                            const speedStr = exec.params.fanSpeed; // ex: "s1", "auto"
+                            let targetFan = 0;
+                            if (speedStr.startsWith("s")) {
+                                targetFan = parseInt(speedStr.replace("s", ""), 10);
+                            }
+
                             payloadJson.setFanSpeed = targetFan;
                             payloadJson.power = true;
                             
@@ -289,7 +287,7 @@ app.post('/fulfillment', async (req, res) => {
                     });
                 }
             }
-            return res.json({ requestId, payload: { commands: commands.map(c => ({ ids: c.devices.map(d => c.id), status: "SUCCESS" })) } });
+            return res.json({ requestId, payload: { commands: commands.map(c => ({ ids: c.devices.map(d => d.id), status: "SUCCESS" })) } });
         }
     } catch (error) {
         console.error("Erreur d'exécution :", error);
