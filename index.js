@@ -52,26 +52,16 @@ function getTemp(clim) {
     return (!isNaN(num) && num > 0 && num < 60) ? num : 20.0;
 }
 
-// Lecture et conversion de la vitesse en mode Google
-function getGoogleThermostatMode(clim) {
+function getGoogleMode(clim) {
     if (!isPoweredOn(clim)) return "off"; 
     
-    const opMode = String(getSetting(clim, ["operationMode", "OperationMode"]) || "Automatic").toLowerCase();
-    const fanVal = getSetting(clim, ["setFanSpeed", "SetFanSpeed", "fanSpeed", "FanSpeed"]);
+    const val = getSetting(clim, ["operationMode", "OperationMode"]);
+    const mode = String(val || "Automatic").toLowerCase();
     
-    // Si la clim est en mode ventilation pure
-    if (opMode.includes("fan")) return "fan-only";
-    
-    // On mappe la vitesse active en mode thermostat étendu pour Google
-    if (fanVal === 1 || fanVal === "One") return "speed_1";
-    if (fanVal === 2 || fanVal === "Two") return "speed_2";
-    if (fanVal === 3 || fanVal === "Three") return "speed_3";
-    if (fanVal === 4 || fanVal === "Four") return "speed_4";
-    if (fanVal === 5 || fanVal === "Five") return "speed_5";
-    
-    if (opMode.includes("cool")) return "cool";
-    if (opMode.includes("heat")) return "heat";
-    if (opMode.includes("dry")) return "dry";
+    if (mode.includes("cool")) return "cool";
+    if (mode.includes("heat")) return "heat";
+    if (mode.includes("dry")) return "dry";
+    if (mode.includes("fan")) return "fan-only";
     return "auto";
 }
 
@@ -163,7 +153,6 @@ app.post('/fulfillment', async (req, res) => {
     if (!userCookie) return res.status(401).send("Jeton invalide");
 
     try {
-        // SYNC : On expose les vitesses de ventilation en tant que modes de thermostat acceptés par Google
         if (intent === 'action.devices.SYNC') {
             const clims = await fetchMelcloudDevices(userCookie);
             const googleDevices = clims.map(clim => ({
@@ -175,8 +164,7 @@ app.post('/fulfillment', async (req, res) => {
                 name: { name: clim.givenDisplayName || clim.GivenDisplayName || "Climatiseur" },
                 willReportState: false,
                 attributes: { 
-                    // Ajout des modes de vitesses directement dans les modes du thermostat Google
-                    availableThermostatModes: "off,on,heat,cool,dry,fan-only,auto,speed_1,speed_2,speed_3,speed_4,speed_5", 
+                    availableThermostatModes: "off,on,heat,cool,dry,fan-only,auto", 
                     thermostatTemperatureUnit: "C" 
                 }
             }));
@@ -192,7 +180,7 @@ app.post('/fulfillment', async (req, res) => {
                 devicesState[id] = {
                     online: true,
                     status: "SUCCESS",
-                    thermostatMode: getGoogleThermostatMode(clim),
+                    thermostatMode: getGoogleMode(clim),
                     thermostatTemperatureSetpoint: getTemp(clim),
                     thermostatTemperatureAmbient: getRoomTemp(clim)
                 };
@@ -231,30 +219,8 @@ app.post('/fulfillment', async (req, res) => {
                                 if (mode === "cool") payloadJson.operationMode = "Cool";
                                 if (mode === "heat") payloadJson.operationMode = "Heat";
                                 if (mode === "dry") payloadJson.operationMode = "Dry";
-                                if (mode === "fan-only") {
-                                    payloadJson.operationMode = "Fan";
-                                } else if (mode.startsWith("speed_")) {
-                                    // Extraction du numéro de vitesse (1 à 5)
-                                    const speedNum = parseInt(mode.replace("speed_", ""), 10);
-                                    const speedTexts = ["", "One", "Two", "Three", "Four", "Five"];
-                                    payloadJson.setFanSpeed = speedTexts[speedNum] || "One";
-                                    
-                                    // Sécurité tableaux internes
-                                    ['settings', 'unitSettings'].forEach(containerKey => {
-                                        if (Array.isArray(payloadJson[containerKey])) {
-                                            payloadJson[containerKey].forEach(item => {
-                                                const itemName = String(item.name || item.Name || "").toLowerCase();
-                                                if (itemName.includes("fanspeed")) {
-                                                    item.value = payloadJson.setFanSpeed;
-                                                    item.Value = payloadJson.setFanSpeed;
-                                                }
-                                            });
-                                        }
-                                    });
-                                } else if (mode === "auto") {
-                                    payloadJson.operationMode = "Automatic";
-                                    payloadJson.setFanSpeed = 0;
-                                }
+                                if (mode === "fan-only") payloadJson.operationMode = "Fan";
+                                if (mode === "auto") payloadJson.operationMode = "Automatic";
                             }
                         }
                     });
