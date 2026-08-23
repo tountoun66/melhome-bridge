@@ -166,8 +166,6 @@ app.post('/fulfillment', async (req, res) => {
                     availableThermostatModes: "off,on,heat,cool,dry,fan-only,auto", 
                     thermostatTemperatureUnit: "C",
                     supportsFanSpeedPercent: false,
-                    // Attributs corrigés et complétés pour forcer Google à valider la ventilation :
-                    commandOnlyFanSpeed: false,
                     availableFanSpeeds: {
                         speeds: [
                             { speed_name: "auto", speed_values: [{ lang_format: "en", speed_synonym: ["auto"] }, { lang_format: "fr", speed_synonym: ["automatique", "auto"] }] },
@@ -240,13 +238,15 @@ app.post('/fulfillment', async (req, res) => {
                                 if (mode === "auto") jsonMap.operationMode = "Automatic";
                             }
                         }
-                        // C'est ici que l'ordre de ventilation sera intercepté
+                        // TRaduction exacte et forcée dans tous les formats que Mitsubishi attend
                         if (exec.command === 'action.devices.commands.FanSpeed') {
                             const speedStr = exec.params.fanSpeed;
                             const targetFan = (speedStr === "auto") ? 0 : parseInt(speedStr, 10);
                             
+                            // 1. Mise à jour racine
                             jsonMap.setFanSpeed = targetFan;
                             
+                            // 2. Mise à jour dans les tableaux de configuration internes
                             ['settings', 'unitSettings'].forEach(containerKey => {
                                 if (Array.isArray(jsonMap[containerKey])) {
                                     jsonMap[containerKey].forEach(item => {
@@ -261,8 +261,6 @@ app.post('/fulfillment', async (req, res) => {
                         }
                     });
 
-                    console.log(`=== REQUÊTE VENTILATION/PUT (CLIM ${climId}) ===`, JSON.stringify(jsonMap));
-
                     const mitsubishiResponse = await fetch(`https://melcloudhome.com/api/ataunit/${climId}`, {
                         method: 'PUT',
                         headers: {
@@ -275,9 +273,6 @@ app.post('/fulfillment', async (req, res) => {
                         },
                         body: JSON.stringify(jsonMap)
                     });
-
-                    const responseText = await mitsubishiResponse.text();
-                    console.log(`=== RÉPONSE MITSUBISHI (Statut ${mitsubishiResponse.status}) ===`, responseText);
                 }
             }
             return res.json({ requestId, payload: { commands: commands.map(c => ({ ids: c.devices.map(d => d.id), status: "SUCCESS" })) } });
