@@ -132,14 +132,12 @@ app.all('/oauth/token', (req, res) => {
     res.json({ access_token: accessToken, token_type: "Bearer", expires_in: 31536000 });
 });
 
-// --- 4. LE FULFILLMENT ---
+// --- 4. LE FULFILLMENT (Le serveur qui obéit à Google) ---
 app.post('/fulfillment', async (req, res) => {
     const body = req.body;
     const requestId = body?.requestId;
     const intent = body?.inputs[0]?.intent;
     const authHeader = req.headers.authorization;
-
-    console.log("=== REQUÊTE GOOGLE ===", intent);
 
     if (!authHeader) return res.status(401).send("Non autorisé");
     
@@ -151,22 +149,26 @@ app.post('/fulfillment', async (req, res) => {
     }
 
     try {
+        // LA MODIFICATION EST ICI (Plus de OnOff !)
         if (intent === 'action.devices.SYNC') {
             const clims = await fetchMelcloudDevices(userCookie);
             const googleDevices = clims.map(clim => ({
                 id: (clim.id || clim.ID).toString(),
                 type: "action.devices.types.THERMOSTAT",
-                traits: ["action.devices.traits.TemperatureSetting", "action.devices.traits.OnOff"],
+                traits: [
+                    "action.devices.traits.TemperatureSetting" 
+                ],
                 name: { name: clim.givenDisplayName || clim.GivenDisplayName || "Climatiseur" },
                 willReportState: false,
                 attributes: { 
-                    availableThermostatModes: "off,heat,cool,dry,fan-only,auto", 
-                    thermostatTemperatureUnit: "C" // LE CORRECTIF EST ICI !
+                    availableThermostatModes: "off,on,heat,cool,dry,fan-only,auto", // J'ai rajouté "on"
+                    thermostatTemperatureUnit: "C" 
                 }
             }));
             return res.json({ requestId, payload: { agentUserId: "melhome_user", devices: googleDevices } });
         }
 
+        // LA MODIFICATION EST LÀ (On ne renvoie plus la ligne "on: true")
         if (intent === 'action.devices.QUERY') {
             const clims = await fetchMelcloudDevices(userCookie);
             const devicesState = {};
@@ -176,14 +178,11 @@ app.post('/fulfillment', async (req, res) => {
                 devicesState[id] = {
                     online: true,
                     status: "SUCCESS",
-                    on: isPoweredOn(clim),
                     thermostatMode: getGoogleMode(clim),
                     thermostatTemperatureSetpoint: getTemp(clim),
                     thermostatAmbientTemperature: getRoomTemp(clim)
                 };
             });
-            
-            console.log("=== ÉTAT ENVOYÉ ===", JSON.stringify(devicesState, null, 2));
             return res.json({ requestId, payload: { devices: devicesState } });
         }
 
@@ -202,12 +201,14 @@ app.post('/fulfillment', async (req, res) => {
                     let payloadJson = { ...currentDeviceData }; 
                     
                     command.execution.forEach(exec => {
+                        // Si Google envoie quand même un ordre OnOff (ex: "Allume la clim")
                         if (exec.command === 'action.devices.commands.OnOff') {
                             payloadJson.power = exec.params.on;
                         }
                         if (exec.command === 'action.devices.commands.ThermostatTemperatureSetpoint') {
                             payloadJson.setTemperature = exec.params.thermostatTemperatureSetpoint;
                         }
+                        // La gestion du mode Thermostat
                         if (exec.command === 'action.devices.commands.ThermostatSetMode') {
                             const mode = exec.params.thermostatMode;
                             if (mode === "off") {
@@ -240,7 +241,7 @@ app.post('/fulfillment', async (req, res) => {
             return res.json({ requestId, payload: { commands: commands.map(c => ({ ids: c.devices.map(d => d.id), status: "SUCCESS" })) } });
         }
     } catch (error) {
-        console.error("=== ERREUR CRITIQUE ===", error);
+        console.error("Erreur d'exécution MELCloud :", error);
         return res.json({ requestId, payload: { errorCode: "hardError" } });
     }
 
