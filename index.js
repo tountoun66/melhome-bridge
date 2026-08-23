@@ -90,6 +90,7 @@ app.post('/api/save-cookie', (req, res) => {
     if (!cookie) return res.status(400).json({ error: "Cookie manquant" });
     const pairCode = Math.floor(1000 + Math.random() * 9000).toString();
     pairCodes[pairCode] = cookie;
+    // Sauvegarde persistante anti-perte de lien Google Home
     pairCodes["master_cookie"] = cookie;
     res.json({ success: true, pairCode: pairCode });
 });
