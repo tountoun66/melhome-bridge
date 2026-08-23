@@ -5,10 +5,9 @@ const PORT = process.env.PORT || 3000;
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 
-// Mémoire temporaire pour l'association
 const pairCodes = {}; 
 
-// --- 1. FONCTIONS DE LECTURE ROBUSTES (Traduites de votre Kotlin) ---
+// --- 1. FONCTIONS DE LECTURE ROBUSTES (Filtre anti-zéro) ---
 function extractXsrf(cookieStr) {
     const match = cookieStr.match(/XSRF-TOKEN=([^;]+)/i);
     if (match) {
@@ -17,50 +16,65 @@ function extractXsrf(cookieStr) {
     return "1";
 }
 
-function getSetting(clim, keys) {
-    // 1. Cherche à la racine
+// Cherche la vraie température et rejette les 0
+function getValidTemp(clim, keys) {
+    // 1. Cherche à la racine dans l'ordre de priorité
     for (let key of keys) {
-        if (clim[key] !== undefined && clim[key] !== null) return clim[key];
+        if (clim[key] !== undefined && clim[key] !== null) {
+            let val = parseFloat(clim[key]);
+            // On s'assure que la température est réelle (entre 1°C et 60°C)
+            if (!isNaN(val) && val > 0 && val < 60) return val; 
+        }
     }
-    // 2. Cherche dans les sous-dossiers (settings ou unitSettings)
+    
+    // 2. Cherche dans les sous-dossiers si la racine donnait 0
     const containers = [];
     if (Array.isArray(clim.settings)) containers.push(clim.settings);
     if (Array.isArray(clim.unitSettings)) containers.push(clim.unitSettings);
     
     for (let container of containers) {
         for (let item of container) {
-            const itemName = (item.name || item.Name || "");
-            if (keys.some(k => k.toLowerCase() === itemName.toLowerCase())) {
-                if (item.value !== undefined && item.value !== null) return item.value;
-                if (item.Value !== undefined && item.Value !== null) return item.Value;
+            const itemName = String(item.name || item.Name || "").toLowerCase();
+            if (keys.some(k => k.toLowerCase() === itemName)) {
+                let val = parseFloat(item.value || item.Value);
+                if (!isNaN(val) && val > 0 && val < 60) return val;
             }
         }
     }
-    return null;
-}
-
-function isPoweredOn(clim) {
-    const val = getSetting(clim, ["power", "Power"]);
-    return val === true || String(val).toLowerCase() === "true";
-}
-
-function getTemp(clim) {
-    const val = getSetting(clim, ["setTemperature", "SetTemperature", "targetTemperature", "TargetTemperature"]);
-    const num = parseFloat(val);
-    return isNaN(num) ? 20.0 : num; // 20.0 par défaut pour éviter de faire planter Google
+    return 20.0; // Valeur de secours pour empêcher Google de désactiver la clim
 }
 
 function getRoomTemp(clim) {
-    const val = getSetting(clim, ["roomTemperature", "RoomTemperature", "indoorTemperature", "IndoorTemperature"]);
-    const num = parseFloat(val);
-    return isNaN(num) ? 20.0 : num;
+    return getValidTemp(clim, ["roomTemperature", "RoomTemperature", "indoorTemperature", "IndoorTemperature", "currentTemperature", "temperature"]);
+}
+
+function getTemp(clim) {
+    return getValidTemp(clim, ["setTemperature", "SetTemperature", "targetTemperature", "TargetTemperature", "defaultTemperature"]);
+}
+
+function isPoweredOn(clim) {
+    const powerKeys = ["power", "Power"];
+    for (let key of powerKeys) {
+        if (clim[key] !== undefined && clim[key] !== null) {
+            return clim[key] === true || String(clim[key]).toLowerCase() === "true";
+        }
+    }
+    return false;
 }
 
 function getGoogleMode(clim) {
     if (!isPoweredOn(clim)) return "off";
-    const val = getSetting(clim, ["operationMode", "OperationMode"]);
-    const mode = String(val || "Automatic").toLowerCase();
     
+    let modeValue = "Automatic";
+    const modeKeys = ["operationMode", "OperationMode"];
+    for (let key of modeKeys) {
+        if (clim[key] !== undefined && clim[key] !== null) {
+            modeValue = String(clim[key]);
+            break;
+        }
+    }
+
+    const mode = modeValue.toLowerCase();
     if (mode.includes("cool")) return "cool";
     if (mode.includes("heat")) return "heat";
     if (mode.includes("dry")) return "dry";
@@ -68,7 +82,7 @@ function getGoogleMode(clim) {
     return "auto";
 }
 
-// --- 2. FONCTIONS RÉSEAU ---
+// --- 2. REQUÊTES MITSUBISHI ---
 async function fetchMelcloudDevices(cookie) {
     const xsrf = extractXsrf(cookie);
     const safeCookie = cookie.trim().replace(/\n|\r/g, "");
@@ -84,12 +98,12 @@ async function fetchMelcloudDevices(cookie) {
         }
     });
     
-    if (!response.ok) throw new Error("Erreur de connexion à MELCloud Home");
+    if (!response.ok) throw new Error("Erreur de connexion API");
     const data = await response.json();
     return (data.buildings && data.buildings.length > 0) ? (data.buildings[0].airToAirUnits || []) : [];
 }
 
-// --- 3. ROUTES ---
+// --- 3. ROUTES DE L'APPLICATION ---
 app.post('/api/save-cookie', (req, res) => {
     const { cookie } = req.body;
     if (!cookie) return res.status(400).json({ error: "Cookie manquant" });
@@ -110,7 +124,7 @@ app.get('/oauth/auth', (req, res) => {
                     <input type="hidden" name="redirect_uri" value="${redirect_uri || ''}" />
                     <input type="hidden" name="state" value="${state || ''}" />
                     <input type="text" name="pairCode" placeholder="Code" maxlength="4" style="padding: 10px; width: 200px; font-size: 24px; text-align: center; letter-spacing: 5px;" required />
-                    <br><br><button type="submit" style="padding: 12px 24px; background: #2196F3; color: white; border: none; cursor: pointer;">Valider</button>
+                    <br><br><button type="submit" style="padding: 12px 24px; background: #2196F3; color: white; border: none; cursor: pointer; border-radius: 5px;">Valider</button>
                 </form>
             </body>
         </html>
@@ -134,10 +148,10 @@ app.all('/oauth/token', (req, res) => {
 
     const accessToken = Buffer.from(userCookie).toString('base64');
     delete pairCodes[code]; 
-
     res.json({ access_token: accessToken, token_type: "Bearer", expires_in: 31536000 });
 });
 
+// --- 4. LE FULFILLMENT (Écoute des commandes) ---
 app.post('/fulfillment', async (req, res) => {
     const body = req.body;
     const requestId = body?.requestId;
@@ -167,7 +181,6 @@ app.post('/fulfillment', async (req, res) => {
             return res.json({ requestId, payload: { agentUserId: "melhome_user", devices: googleDevices } });
         }
 
-        // C'est ici que la magie opère pour enlever le "0°" !
         if (intent === 'action.devices.QUERY') {
             const clims = await fetchMelcloudDevices(userCookie);
             const devicesState = {};
@@ -180,7 +193,7 @@ app.post('/fulfillment', async (req, res) => {
                     on: isPoweredOn(clim),
                     thermostatMode: getGoogleMode(clim),
                     thermostatTemperatureSetpoint: getTemp(clim),
-                    thermostatAmbientTemperature: getRoomTemp(clim)
+                    thermostatAmbientTemperature: getRoomTemp(clim) // Le correctif s'applique ici !
                 };
             });
             return res.json({ requestId, payload: { devices: devicesState } });
@@ -239,7 +252,7 @@ app.post('/fulfillment', async (req, res) => {
             return res.json({ requestId, payload: { commands: commands.map(c => ({ ids: c.devices.map(d => d.id), status: "SUCCESS" })) } });
         }
     } catch (error) {
-        console.error("Erreur MELCloud :", error);
+        console.error("Erreur exécution :", error);
         return res.json({ requestId, payload: { errorCode: "hardError" } });
     }
 
