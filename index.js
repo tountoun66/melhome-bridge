@@ -7,7 +7,7 @@ app.use(express.json());
 
 const pairCodes = {}; 
 
-// --- 1. FONCTIONS DE LECTURE ROBUSTES (Filtre anti-zéro) ---
+// --- 1. LE "SUPER EXTRACTEUR" DE DONNÉES ---
 function extractXsrf(cookieStr) {
     const match = cookieStr.match(/XSRF-TOKEN=([^;]+)/i);
     if (match) {
@@ -16,18 +16,14 @@ function extractXsrf(cookieStr) {
     return "1";
 }
 
-// Cherche la vraie température et rejette les 0
-function getValidTemp(clim, keys) {
-    // 1. Cherche à la racine dans l'ordre de priorité
+// Fonction qui fouille partout comme dans votre application Android
+function getSetting(clim, keys) {
+    // 1. Cherche à la racine
     for (let key of keys) {
-        if (clim[key] !== undefined && clim[key] !== null) {
-            let val = parseFloat(clim[key]);
-            // On s'assure que la température est réelle (entre 1°C et 60°C)
-            if (!isNaN(val) && val > 0 && val < 60) return val; 
-        }
+        if (clim[key] !== undefined && clim[key] !== null) return clim[key];
     }
     
-    // 2. Cherche dans les sous-dossiers si la racine donnait 0
+    // 2. Cherche dans les sous-dossiers
     const containers = [];
     if (Array.isArray(clim.settings)) containers.push(clim.settings);
     if (Array.isArray(clim.unitSettings)) containers.push(clim.unitSettings);
@@ -36,45 +32,37 @@ function getValidTemp(clim, keys) {
         for (let item of container) {
             const itemName = String(item.name || item.Name || "").toLowerCase();
             if (keys.some(k => k.toLowerCase() === itemName)) {
-                let val = parseFloat(item.value || item.Value);
-                if (!isNaN(val) && val > 0 && val < 60) return val;
+                if (item.value !== undefined && item.value !== null) return item.value;
+                if (item.Value !== undefined && item.Value !== null) return item.Value;
             }
         }
     }
-    return 20.0; // Valeur de secours pour empêcher Google de désactiver la clim
-}
-
-function getRoomTemp(clim) {
-    return getValidTemp(clim, ["roomTemperature", "RoomTemperature", "indoorTemperature", "IndoorTemperature", "currentTemperature", "temperature"]);
-}
-
-function getTemp(clim) {
-    return getValidTemp(clim, ["setTemperature", "SetTemperature", "targetTemperature", "TargetTemperature", "defaultTemperature"]);
+    return null;
 }
 
 function isPoweredOn(clim) {
-    const powerKeys = ["power", "Power"];
-    for (let key of powerKeys) {
-        if (clim[key] !== undefined && clim[key] !== null) {
-            return clim[key] === true || String(clim[key]).toLowerCase() === "true";
-        }
-    }
-    return false;
+    const val = getSetting(clim, ["power", "Power"]);
+    return val === true || String(val).toLowerCase() === "true";
+}
+
+function getRoomTemp(clim) {
+    const val = getSetting(clim, ["roomTemperature", "RoomTemperature", "indoorTemperature", "IndoorTemperature"]);
+    const num = parseFloat(val);
+    return (!isNaN(num) && num > 0 && num < 60) ? num : 20.0; // Bloque le 0°
+}
+
+function getTemp(clim) {
+    const val = getSetting(clim, ["setTemperature", "SetTemperature", "targetTemperature", "TargetTemperature", "defaultTemperature"]);
+    const num = parseFloat(val);
+    return (!isNaN(num) && num > 0 && num < 60) ? num : 20.0; // Bloque le 0°
 }
 
 function getGoogleMode(clim) {
-    if (!isPoweredOn(clim)) return "off";
+    if (!isPoweredOn(clim)) return "off"; // C'est ici que Google affiche "Désactivé"
     
-    let modeValue = "Automatic";
-    const modeKeys = ["operationMode", "OperationMode"];
-    for (let key of modeKeys) {
-        if (clim[key] !== undefined && clim[key] !== null) {
-            modeValue = String(clim[key]);
-            break;
-        }
-    }
-
-    const mode = modeValue.toLowerCase();
+    const val = getSetting(clim, ["operationMode", "OperationMode"]);
+    const mode = String(val || "Automatic").toLowerCase();
+    
     if (mode.includes("cool")) return "cool";
     if (mode.includes("heat")) return "heat";
     if (mode.includes("dry")) return "dry";
@@ -82,7 +70,7 @@ function getGoogleMode(clim) {
     return "auto";
 }
 
-// --- 2. REQUÊTES MITSUBISHI ---
+// --- 2. FONCTIONS RÉSEAU MITSUBISHI ---
 async function fetchMelcloudDevices(cookie) {
     const xsrf = extractXsrf(cookie);
     const safeCookie = cookie.trim().replace(/\n|\r/g, "");
@@ -98,12 +86,12 @@ async function fetchMelcloudDevices(cookie) {
         }
     });
     
-    if (!response.ok) throw new Error("Erreur de connexion API");
+    if (!response.ok) throw new Error("Erreur de connexion API HTTP " + response.status);
     const data = await response.json();
     return (data.buildings && data.buildings.length > 0) ? (data.buildings[0].airToAirUnits || []) : [];
 }
 
-// --- 3. ROUTES DE L'APPLICATION ---
+// --- 3. ROUTES D'ASSOCIATION ---
 app.post('/api/save-cookie', (req, res) => {
     const { cookie } = req.body;
     if (!cookie) return res.status(400).json({ error: "Cookie manquant" });
@@ -119,7 +107,6 @@ app.get('/oauth/auth', (req, res) => {
             <head><title>Connexion Melhome</title></head>
             <body style="font-family: Arial; padding: 40px; text-align: center;">
                 <h2>Associer Melhome</h2>
-                <p>Ouvrez l'application Melhome pour obtenir votre code d'association.</p>
                 <form method="POST" action="/oauth/login">
                     <input type="hidden" name="redirect_uri" value="${redirect_uri || ''}" />
                     <input type="hidden" name="state" value="${state || ''}" />
@@ -135,7 +122,6 @@ app.post('/oauth/login', (req, res) => {
     const { pairCode, redirect_uri, state } = req.body;
     const userCookie = pairCodes[pairCode];
     if (!userCookie) return res.send("Erreur : Code invalide.");
-
     const authCode = "auth_" + pairCode + "_" + Math.random().toString(36).substr(2, 5);
     pairCodes[authCode] = userCookie; 
     res.redirect(`${redirect_uri}?code=${authCode}&state=${state || ''}`);
@@ -145,18 +131,19 @@ app.all('/oauth/token', (req, res) => {
     const code = req.body.code || req.query.code;
     const userCookie = pairCodes[code];
     if (!userCookie) return res.status(400).send("Code expiré");
-
     const accessToken = Buffer.from(userCookie).toString('base64');
     delete pairCodes[code]; 
     res.json({ access_token: accessToken, token_type: "Bearer", expires_in: 31536000 });
 });
 
-// --- 4. LE FULFILLMENT (Écoute des commandes) ---
+// --- 4. LE CŒUR DE L'APPLICATION (FULFILLMENT) ---
 app.post('/fulfillment', async (req, res) => {
     const body = req.body;
     const requestId = body?.requestId;
     const intent = body?.inputs[0]?.intent;
     const authHeader = req.headers.authorization;
+
+    console.log("=== REQUÊTE GOOGLE REÇUE ===", intent);
 
     if (!authHeader) return res.status(401).send("Non autorisé");
     
@@ -181,6 +168,7 @@ app.post('/fulfillment', async (req, res) => {
             return res.json({ requestId, payload: { agentUserId: "melhome_user", devices: googleDevices } });
         }
 
+        // C'EST ICI QUE GOOGLE DEMANDE L'ÉTAT ACTUEL
         if (intent === 'action.devices.QUERY') {
             const clims = await fetchMelcloudDevices(userCookie);
             const devicesState = {};
@@ -193,9 +181,12 @@ app.post('/fulfillment', async (req, res) => {
                     on: isPoweredOn(clim),
                     thermostatMode: getGoogleMode(clim),
                     thermostatTemperatureSetpoint: getTemp(clim),
-                    thermostatAmbientTemperature: getRoomTemp(clim) // Le correctif s'applique ici !
+                    thermostatAmbientTemperature: getRoomTemp(clim)
                 };
             });
+            
+            // On affiche le résultat dans la console Render pour vérifier s'il y a un souci
+            console.log("=== ÉTAT ENVOYÉ À GOOGLE ===", JSON.stringify(devicesState, null, 2));
             return res.json({ requestId, payload: { devices: devicesState } });
         }
 
@@ -252,7 +243,7 @@ app.post('/fulfillment', async (req, res) => {
             return res.json({ requestId, payload: { commands: commands.map(c => ({ ids: c.devices.map(d => d.id), status: "SUCCESS" })) } });
         }
     } catch (error) {
-        console.error("Erreur exécution :", error);
+        console.error("=== ERREUR CRITIQUE ===", error);
         return res.json({ requestId, payload: { errorCode: "hardError" } });
     }
 
