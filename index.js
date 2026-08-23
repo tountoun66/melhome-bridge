@@ -52,12 +52,6 @@ function getTemp(clim) {
     return (!isNaN(num) && num > 0 && num < 60) ? num : 20.0;
 }
 
-function getFanSpeed(clim) {
-    const val = getSetting(clim, ["setFanSpeed", "SetFanSpeed", "fanSpeed", "FanSpeed"]);
-    const num = parseInt(val, 10);
-    return (!isNaN(num) && num >= 0 && num <= 5) ? num : 0;
-}
-
 function getGoogleMode(clim) {
     if (!isPoweredOn(clim)) return "off"; 
     
@@ -157,26 +151,13 @@ app.post('/fulfillment', async (req, res) => {
                 id: (clim.id || clim.ID).toString(),
                 type: "action.devices.types.THERMOSTAT",
                 traits: [
-                    "action.devices.traits.TemperatureSetting",
-                    "action.devices.traits.FanSpeed"
+                    "action.devices.traits.TemperatureSetting"
                 ],
                 name: { name: clim.givenDisplayName || clim.GivenDisplayName || "Climatiseur" },
                 willReportState: false,
                 attributes: { 
                     availableThermostatModes: "off,on,heat,cool,dry,fan-only,auto", 
-                    thermostatTemperatureUnit: "C",
-                    supportsFanSpeedPercent: false,
-                    availableFanSpeeds: {
-                        speeds: [
-                            { speed_name: "auto", speed_values: [{ lang_format: "en", speed_synonym: ["auto"] }, { lang_format: "fr", speed_synonym: ["automatique", "auto"] }] },
-                            { speed_name: "1", speed_values: [{ lang_format: "en", speed_synonym: ["speed 1", "one"] }, { lang_format: "fr", speed_synonym: ["vitesse 1", "un"] }] },
-                            { speed_name: "2", speed_values: [{ lang_format: "en", speed_synonym: ["speed 2", "two"] }, { lang_format: "fr", speed_synonym: ["vitesse 2", "deux"] }] },
-                            { speed_name: "3", speed_values: [{ lang_format: "en", speed_synonym: ["speed 3", "three"] }, { lang_format: "fr", speed_synonym: ["vitesse 3", "trois"] }] },
-                            { speed_name: "4", speed_values: [{ lang_format: "en", speed_synonym: ["speed 4", "four"] }, { lang_format: "fr", speed_synonym: ["vitesse 4", "quatre"] }] },
-                            { speed_name: "5", speed_values: [{ lang_format: "en", speed_synonym: ["speed 5", "five"] }, { lang_format: "fr", speed_synonym: ["vitesse 5", "cinq"] }] }
-                        ],
-                        ordered: true
-                    }
+                    thermostatTemperatureUnit: "C" 
                 }
             }));
             return res.json({ requestId, payload: { agentUserId: "melhome_user", devices: googleDevices } });
@@ -188,16 +169,12 @@ app.post('/fulfillment', async (req, res) => {
 
             clims.forEach(clim => {
                 const id = (clim.id || clim.ID).toString();
-                const fanVal = getFanSpeed(clim);
-                const fanName = fanVal === 0 ? "auto" : fanVal.toString();
-
                 devicesState[id] = {
                     online: true,
                     status: "SUCCESS",
                     thermostatMode: getGoogleMode(clim),
                     thermostatTemperatureSetpoint: getTemp(clim),
-                    thermostatTemperatureAmbient: getRoomTemp(clim),
-                    currentFanSpeedSetting: fanName
+                    thermostatTemperatureAmbient: getRoomTemp(clim)
                 };
             });
             
@@ -216,52 +193,31 @@ app.post('/fulfillment', async (req, res) => {
                     const currentDeviceData = clims.find(c => (c.id || c.ID).toString() === climId);
                     if (!currentDeviceData) continue;
 
-                    let jsonMap = JSON.parse(JSON.stringify(currentDeviceData)); 
+                    let payloadJson = { ...currentDeviceData }; 
                     
                     command.execution.forEach(exec => {
                         if (exec.command === 'action.devices.commands.OnOff') {
-                            jsonMap.power = exec.params.on;
+                            payloadJson.power = exec.params.on;
                         }
                         if (exec.command === 'action.devices.commands.ThermostatTemperatureSetpoint') {
-                            jsonMap.setTemperature = exec.params.thermostatTemperatureSetpoint;
+                            payloadJson.setTemperature = exec.params.thermostatTemperatureSetpoint;
                         }
                         if (exec.command === 'action.devices.commands.ThermostatSetMode') {
                             const mode = exec.params.thermostatMode;
                             if (mode === "off") {
-                                jsonMap.power = false;
+                                payloadJson.power = false;
                             } else {
-                                jsonMap.power = true;
-                                if (mode === "cool") jsonMap.operationMode = "Cool";
-                                if (mode === "heat") jsonMap.operationMode = "Heat";
-                                if (mode === "dry") jsonMap.operationMode = "Dry";
-                                if (mode === "fan-only") jsonMap.operationMode = "Fan";
-                                if (mode === "auto") jsonMap.operationMode = "Automatic";
+                                payloadJson.power = true;
+                                if (mode === "cool") payloadJson.operationMode = "Cool";
+                                if (mode === "heat") payloadJson.operationMode = "Heat";
+                                if (mode === "dry") payloadJson.operationMode = "Dry";
+                                if (mode === "fan-only") payloadJson.operationMode = "Fan";
+                                if (mode === "auto") payloadJson.operationMode = "Automatic";
                             }
-                        }
-                        // TRaduction exacte et forcée dans tous les formats que Mitsubishi attend
-                        if (exec.command === 'action.devices.commands.FanSpeed') {
-                            const speedStr = exec.params.fanSpeed;
-                            const targetFan = (speedStr === "auto") ? 0 : parseInt(speedStr, 10);
-                            
-                            // 1. Mise à jour racine
-                            jsonMap.setFanSpeed = targetFan;
-                            
-                            // 2. Mise à jour dans les tableaux de configuration internes
-                            ['settings', 'unitSettings'].forEach(containerKey => {
-                                if (Array.isArray(jsonMap[containerKey])) {
-                                    jsonMap[containerKey].forEach(item => {
-                                        const itemName = String(item.name || item.Name || "").toLowerCase();
-                                        if (itemName.includes("fanspeed")) {
-                                            item.value = targetFan;
-                                            item.Value = targetFan;
-                                        }
-                                    });
-                                }
-                            });
                         }
                     });
 
-                    const mitsubishiResponse = await fetch(`https://melcloudhome.com/api/ataunit/${climId}`, {
+                    await fetch(`https://melcloudhome.com/api/ataunit/${climId}`, {
                         method: 'PUT',
                         headers: {
                             "Content-Type": "application/json; charset=utf-8",
@@ -271,7 +227,7 @@ app.post('/fulfillment', async (req, res) => {
                             "X-Requested-With": "XMLHttpRequest",
                             "Accept": "application/json, text/plain, */*"
                         },
-                        body: JSON.stringify(jsonMap)
+                        body: JSON.stringify(payloadJson)
                     });
                 }
             }
