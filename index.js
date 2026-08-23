@@ -132,7 +132,7 @@ app.all('/oauth/token', (req, res) => {
     res.json({ access_token: accessToken, token_type: "Bearer", expires_in: 31536000 });
 });
 
-// --- 4. LE FULFILLMENT (Le serveur qui obéit à Google) ---
+// --- 4. LE FULFILLMENT ---
 app.post('/fulfillment', async (req, res) => {
     const body = req.body;
     const requestId = body?.requestId;
@@ -149,7 +149,6 @@ app.post('/fulfillment', async (req, res) => {
     }
 
     try {
-        // LA MODIFICATION EST ICI (Plus de OnOff !)
         if (intent === 'action.devices.SYNC') {
             const clims = await fetchMelcloudDevices(userCookie);
             const googleDevices = clims.map(clim => ({
@@ -161,14 +160,14 @@ app.post('/fulfillment', async (req, res) => {
                 name: { name: clim.givenDisplayName || clim.GivenDisplayName || "Climatiseur" },
                 willReportState: false,
                 attributes: { 
-                    availableThermostatModes: "off,on,heat,cool,dry,fan-only,auto", // J'ai rajouté "on"
+                    availableThermostatModes: "off,on,heat,cool,dry,fan-only,auto", 
                     thermostatTemperatureUnit: "C" 
                 }
             }));
             return res.json({ requestId, payload: { agentUserId: "melhome_user", devices: googleDevices } });
         }
 
-        // LA MODIFICATION EST LÀ (On ne renvoie plus la ligne "on: true")
+        // C'ICI QUE LE NOM DE LA VARIABLE CHANGE : "thermostatTemperatureAmbient"
         if (intent === 'action.devices.QUERY') {
             const clims = await fetchMelcloudDevices(userCookie);
             const devicesState = {};
@@ -180,9 +179,11 @@ app.post('/fulfillment', async (req, res) => {
                     status: "SUCCESS",
                     thermostatMode: getGoogleMode(clim),
                     thermostatTemperatureSetpoint: getTemp(clim),
-                    thermostatAmbientTemperature: getRoomTemp(clim)
+                    thermostatTemperatureAmbient: getRoomTemp(clim) // <-- CORRIGÉ ICI !
                 };
             });
+            
+            console.log("=== ÉTAT ENVOYÉ À GOOGLE ===", JSON.stringify(devicesState, null, 2));
             return res.json({ requestId, payload: { devices: devicesState } });
         }
 
@@ -201,14 +202,12 @@ app.post('/fulfillment', async (req, res) => {
                     let payloadJson = { ...currentDeviceData }; 
                     
                     command.execution.forEach(exec => {
-                        // Si Google envoie quand même un ordre OnOff (ex: "Allume la clim")
                         if (exec.command === 'action.devices.commands.OnOff') {
                             payloadJson.power = exec.params.on;
                         }
                         if (exec.command === 'action.devices.commands.ThermostatTemperatureSetpoint') {
                             payloadJson.setTemperature = exec.params.thermostatTemperatureSetpoint;
                         }
-                        // La gestion du mode Thermostat
                         if (exec.command === 'action.devices.commands.ThermostatSetMode') {
                             const mode = exec.params.thermostatMode;
                             if (mode === "off") {
