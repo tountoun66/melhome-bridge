@@ -16,14 +16,10 @@ function extractXsrf(cookieStr) {
     return "1";
 }
 
-// Fonction qui fouille partout comme dans votre application Android
 function getSetting(clim, keys) {
-    // 1. Cherche à la racine
     for (let key of keys) {
         if (clim[key] !== undefined && clim[key] !== null) return clim[key];
     }
-    
-    // 2. Cherche dans les sous-dossiers
     const containers = [];
     if (Array.isArray(clim.settings)) containers.push(clim.settings);
     if (Array.isArray(clim.unitSettings)) containers.push(clim.unitSettings);
@@ -48,17 +44,17 @@ function isPoweredOn(clim) {
 function getRoomTemp(clim) {
     const val = getSetting(clim, ["roomTemperature", "RoomTemperature", "indoorTemperature", "IndoorTemperature"]);
     const num = parseFloat(val);
-    return (!isNaN(num) && num > 0 && num < 60) ? num : 20.0; // Bloque le 0°
+    return (!isNaN(num) && num > 0 && num < 60) ? num : 20.0;
 }
 
 function getTemp(clim) {
     const val = getSetting(clim, ["setTemperature", "SetTemperature", "targetTemperature", "TargetTemperature", "defaultTemperature"]);
     const num = parseFloat(val);
-    return (!isNaN(num) && num > 0 && num < 60) ? num : 20.0; // Bloque le 0°
+    return (!isNaN(num) && num > 0 && num < 60) ? num : 20.0;
 }
 
 function getGoogleMode(clim) {
-    if (!isPoweredOn(clim)) return "off"; // C'est ici que Google affiche "Désactivé"
+    if (!isPoweredOn(clim)) return "off"; 
     
     const val = getSetting(clim, ["operationMode", "OperationMode"]);
     const mode = String(val || "Automatic").toLowerCase();
@@ -136,14 +132,14 @@ app.all('/oauth/token', (req, res) => {
     res.json({ access_token: accessToken, token_type: "Bearer", expires_in: 31536000 });
 });
 
-// --- 4. LE CŒUR DE L'APPLICATION (FULFILLMENT) ---
+// --- 4. LE FULFILLMENT ---
 app.post('/fulfillment', async (req, res) => {
     const body = req.body;
     const requestId = body?.requestId;
     const intent = body?.inputs[0]?.intent;
     const authHeader = req.headers.authorization;
 
-    console.log("=== REQUÊTE GOOGLE REÇUE ===", intent);
+    console.log("=== REQUÊTE GOOGLE ===", intent);
 
     if (!authHeader) return res.status(401).send("Non autorisé");
     
@@ -163,12 +159,14 @@ app.post('/fulfillment', async (req, res) => {
                 traits: ["action.devices.traits.TemperatureSetting", "action.devices.traits.OnOff"],
                 name: { name: clim.givenDisplayName || clim.GivenDisplayName || "Climatiseur" },
                 willReportState: false,
-                attributes: { availableThermostatModes: "off,heat,cool,dry,fan-only,auto", temperatureUnit: "C" }
+                attributes: { 
+                    availableThermostatModes: "off,heat,cool,dry,fan-only,auto", 
+                    thermostatTemperatureUnit: "C" // LE CORRECTIF EST ICI !
+                }
             }));
             return res.json({ requestId, payload: { agentUserId: "melhome_user", devices: googleDevices } });
         }
 
-        // C'EST ICI QUE GOOGLE DEMANDE L'ÉTAT ACTUEL
         if (intent === 'action.devices.QUERY') {
             const clims = await fetchMelcloudDevices(userCookie);
             const devicesState = {};
@@ -185,8 +183,7 @@ app.post('/fulfillment', async (req, res) => {
                 };
             });
             
-            // On affiche le résultat dans la console Render pour vérifier s'il y a un souci
-            console.log("=== ÉTAT ENVOYÉ À GOOGLE ===", JSON.stringify(devicesState, null, 2));
+            console.log("=== ÉTAT ENVOYÉ ===", JSON.stringify(devicesState, null, 2));
             return res.json({ requestId, payload: { devices: devicesState } });
         }
 
