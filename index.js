@@ -1,47 +1,110 @@
 const express = require('express');
-const fetch = (...args) => import('node-fetch').then(({default: fetch}) => fetch(...args));
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(express.json());
 
-app.get('/cmd', async (req, res) => {
-    const { deviceId, power, temp, mode, fan } = req.query;
-    const cookie = process.env.MELCLOUD_COOKIE;
+// Point d'entrée unique (Fulfillment) requis par Google Smart Home
+app.post('/fulfillment', async (req, res) => {
+    const body = req.body;
+    const requestId = body.requestId;
+    
+    // Récupération de l'intention envoyée par Google (SYNC, QUERY, EXECUTE)
+    const input = body.inputs && body.inputs[0];
+    const intent = input && input.intent;
 
-    if (!cookie) {
-        return res.status(500).send("Erreur : Cookie MELCloud non configuré sur Render.");
+    console.log(`Reçu intention Google Smart Home : ${intent}`);
+
+    let payload = {};
+
+    switch (intent) {
+        // ==========================================
+        // 1. SYNC : Liste des appareils de l'utilisateur
+        // ==========================================
+        case 'action.devices.SYNC':
+            // TODO: Récupérer les vrais appareils depuis MELCloud Home pour l'utilisateur connecté
+            payload = {
+                devices: [
+                    {
+                        id: 'clim_salon_123', // ID unique de l'appareil
+                        type: 'action.devices.types.AC_UNIT', // Type Google pour un climatiseur
+                        traits: [
+                            'action.devices.traits.OnOff',
+                            'action.devices.traits.TemperatureSetting'
+                        ],
+                        name: {
+                            defaultNames: ['Climatiseur Melhome'],
+                            name: 'Salon',
+                            nicknames: ['Salon', 'Clim salon']
+                        },
+                        willReportState: false,
+                        attributes: {
+                            availableThermostatModes: 'off,heat,cool,fan_only,auto',
+                            temperatureUnit: 'C'
+                        }
+                    }
+                ]
+            };
+            break;
+
+        // ==========================================
+        // 2. QUERY : État actuel des appareils
+        // ==========================================
+        case 'action.devices.QUERY':
+            // TODO: Interroger l'API MELCloud Home pour obtenir l'état réel de l'appareil
+            payload = {
+                devices: {
+                    'clim_salon_123': {
+                        on: true,
+                        online: true,
+                        thermostatMode: 'heat',
+                        thermostatTemperatureSetpoint: 21.0,
+                        thermostatAmbientTemperature: 19.5
+                    }
+                }
+            };
+            break;
+
+        // ==========================================
+        // 3. EXECUTE : Ordre de pilotage (Voix / App)
+        // ==========================================
+        case 'action.devices.EXECUTE':
+            const command = input.payload.commands[0];
+            const deviceIds = command.devices.map(d => d.id);
+            const execution = command.execution[0];
+            
+            const commandName = execution.command;
+            const params = execution.params;
+
+            console.log(`Commande reçue pour les appareils ${deviceIds} : ${commandName}`, params);
+
+            // TODO : Traduire cet ordre et l'envoyer à l'API de MELCloud Home via le jeton de l'utilisateur
+
+            payload = {
+                commands: [
+                    {
+                        ids: deviceIds,
+                        status: 'SUCCESS',
+                        states: {
+                            on: params.on !== undefined ? params.on : true,
+                            online: true
+                        }
+                    }
+                ]
+            };
+            break;
+
+        default:
+            return res.status(400).send({ error: `Intention non supportée : ${intent}` });
     }
 
-    try {
-        const url = `https://melcloudhome.com/api/ataunit/${deviceId}`;
-        const bodyData = {};
-        if (power !== undefined) bodyData.power = (power === 'true');
-        if (temp !== undefined) bodyData.setTemperature = parseFloat(temp);
-        if (mode !== undefined) bodyData.operationMode = mode;
-        if (fan !== undefined) bodyData.setFanSpeed = parseInt(fan);
-
-        const response = await fetch(url, {
-            method: 'PUT',
-            headers: {
-                'Cookie': cookie,
-                'Content-Type': 'application/json',
-                'X-Requested-With': 'XMLHttpRequest'
-            },
-            body: JSON.stringify(bodyData)
-        });
-
-        if (response.ok) {
-            res.status(200).send("Succès : Commande envoyée !");
-        } else {
-            const errText = await response.text();
-            res.status(500).send(`Erreur MELCloud (${response.status}): ${errText}`);
-        }
-    } catch (error) {
-        res.status(500).send(`Erreur serveur : ${error.message}`);
-    }
+    // Réponse au format exigé par Google
+    res.json({
+        requestId: requestId,
+        payload: payload
+    });
 });
 
 app.listen(PORT, () => {
-    console.log(`Serveur en écoute sur le port ${PORT}`);
+    console.log(`Serveur Cloud-to-Cloud Google Smart Home en écoute sur le port ${PORT}`);
 });
