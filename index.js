@@ -156,8 +156,25 @@ app.post('/fulfillment', (req, res) => {
     }
 
     res.json({ requestId, payload: {} });
-});
 
 app.listen(PORT, () => {
     console.log(`Serveur en ligne sur le port ${PORT}`);
+});
+// La mémoire de notre serveur (pour stocker les Cookies)
+const userCookies = {}; 
+const pairCodes = {}; 
+
+// 1. Route pour que l'App Android dépose le cookie
+app.post('/api/save-cookie', (req, res) => {
+    const { cookie } = req.body;
+    if (!cookie) return res.status(400).send("Cookie manquant");
+
+    // Génère un code à 4 chiffres (ex: 4921)
+    const pairCode = Math.floor(1000 + Math.random() * 9000).toString();
+    
+    // On lie le code au Cookie
+    pairCodes[pairCode] = cookie; 
+
+    // On renvoie le code à l'application Android
+    res.json({ success: true, pairCode: pairCode });
 });
