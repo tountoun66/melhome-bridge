@@ -18,8 +18,8 @@ app.use((req, res, next) => {
 app.get('/oauth/auth', (req, res) => {
     const { client_id, redirect_uri, state, response_type } = req.query;
     
-    // On génère un identifiant de session unique pour stocker l'URL de Google
-    const sessionId = Math.random().toString(36.substring(2));
+    // Correction de la parenthèse ici :
+    const sessionId = Math.random().toString(36).substring(2);
     oauthSessions[sessionId] = { redirect_uri, state };
 
     res.send(`
