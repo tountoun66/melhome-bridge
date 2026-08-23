@@ -53,7 +53,6 @@ function getTemp(clim) {
     return (!isNaN(num) && num > 0 && num < 60) ? num : 20.0;
 }
 
-// Extraction de la vitesse de ventilation (0 = Auto, 1 à 5 = Vitesses)
 function getFanSpeed(clim) {
     const val = getSetting(clim, ["setFanSpeed", "SetFanSpeed", "fanSpeed", "FanSpeed"]);
     const num = parseInt(val, 10);
@@ -156,7 +155,6 @@ app.post('/fulfillment', async (req, res) => {
     }
 
     try {
-        // SYNC : On ajoute le trait FanSpeed et ses attributs
         if (intent === 'action.devices.SYNC') {
             const clims = await fetchMelcloudDevices(userCookie);
             const googleDevices = clims.map(clim => ({
@@ -164,14 +162,13 @@ app.post('/fulfillment', async (req, res) => {
                 type: "action.devices.types.THERMOSTAT",
                 traits: [
                     "action.devices.traits.TemperatureSetting",
-                    "action.devices.traits.FanSpeed" // <-- AJOUT DU TRAIT VENTILATION
+                    "action.devices.traits.FanSpeed"
                 ],
                 name: { name: clim.givenDisplayName || clim.GivenDisplayName || "Climatiseur" },
                 willReportState: false,
                 attributes: { 
                     availableThermostatModes: "off,on,heat,cool,dry,fan-only,auto", 
                     thermostatTemperatureUnit: "C",
-                    // Configuration des vitesses de ventilation pour Google (0 = Auto, 1 à 5)
                     supportsFanSpeedPercent: false,
                     availableFanSpeeds: {
                         speeds: [
@@ -189,7 +186,6 @@ app.post('/fulfillment', async (req, res) => {
             return res.json({ requestId, payload: { agentUserId: "melhome_user", devices: googleDevices } });
         }
 
-        // QUERY : On transmet la vitesse actuelle du ventilateur à Google
         if (intent === 'action.devices.QUERY') {
             const clims = await fetchMelcloudDevices(userCookie);
             const devicesState = {};
@@ -205,14 +201,13 @@ app.post('/fulfillment', async (req, res) => {
                     thermostatMode: getGoogleMode(clim),
                     thermostatTemperatureSetpoint: getTemp(clim),
                     thermostatTemperatureAmbient: getRoomTemp(clim),
-                    currentFanSpeedSetting: fanName // <-- ENVOI DE LA VITESSE ACTUELLE
+                    currentFanSpeedSetting: fanName
                 };
             });
             
             return res.json({ requestId, payload: { devices: devicesState } });
         }
 
-        // EXECUTE : On intercepte les changements (Température, Mode ET Ventilation)
         if (intent === 'action.devices.EXECUTE') {
             const commands = body.inputs[0].payload.commands;
             const clims = await fetchMelcloudDevices(userCookie);
@@ -247,12 +242,17 @@ app.post('/fulfillment', async (req, res) => {
                                 if (mode === "auto") payloadJson.operationMode = "Automatic";
                             }
                         }
-                        // Gestion du changement de vitesse de ventilation depuis Google Home
+                        // CORRECTION CRITIQUE DE LA VENTILATION : Forçage en nombre entier
                         if (exec.command === 'action.devices.commands.FanSpeed') {
-                            const speedStr = exec.params.fanSpeed; // ex: "auto", "1", "2"...
-                            payloadJson.setFanSpeed = speedStr === "auto" ? 0 : parseInt(speedStr, 10);
+                            const speedStr = exec.params.fanSpeed;
+                            payloadJson.setFanSpeed = (speedStr === "auto") ? 0 : parseInt(speedStr, 10);
+                            // On s'assure que la clim est active pour accepter la vitesse
+                            payloadJson.power = true; 
                         }
                     });
+
+                    // Log pour espionner l'ordre exact envoyé à Mitsubishi dans les logs de Render
+                    console.log(`=== ENVOI COMMANDE CLIM ${climId} ===`, JSON.stringify(payloadJson));
 
                     await fetch(`https://melcloudhome.com/api/ataunit/${climId}`, {
                         method: 'PUT',
