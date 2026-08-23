@@ -23,7 +23,7 @@ app.get('/', (req, res) => {
     `);
 });
 
-// 1. Page de connexion OAuth (Affichée par Google)
+// 1. Page de connexion OAuth
 app.get('/oauth/auth', (req, res) => {
     const { client_id, redirect_uri, state } = req.query;
 
@@ -63,7 +63,7 @@ app.post('/oauth/login', (req, res) => {
     res.redirect(targetUrl);
 });
 
-// 3. Token URL (Échange du code)
+// 3. Token URL
 app.all('/oauth/token', (req, res) => {
     console.log("=== REQUÊTE TOKEN REÇUE ===");
     res.setHeader('Cache-Control', 'no-store');
@@ -77,7 +77,7 @@ app.all('/oauth/token', (req, res) => {
     });
 });
 
-// 4. Fulfillment (Le cœur de Google Smart Home)
+// 4. Fulfillment
 app.post('/fulfillment', (req, res) => {
     const body = req.body;
     console.log("=== FULFILLMENT REÇU ===", JSON.stringify(body, null, 2));
@@ -86,7 +86,7 @@ app.post('/fulfillment', (req, res) => {
     const inputs = body?.inputs || [];
     const intent = inputs[0]?.intent;
 
-    // A. Étape de synchronisation (Google demande la liste des appareils)
+    // A. Étape de synchronisation (SYNC)
     if (intent === 'action.devices.SYNC') {
         return res.json({
             requestId: requestId,
@@ -95,7 +95,7 @@ app.post('/fulfillment', (req, res) => {
                 devices: [
                     {
                         id: "clim_salon",
-                        type: "action.devices.type.THERMOSTAT",
+                        type: "action.devices.types.THERMOSTAT", // <-- LA CORRECTION EST LÀ (avec le 's')
                         traits: [
                             "action.devices.traits.TemperatureSetting",
                             "action.devices.traits.OnOff"
@@ -155,7 +155,6 @@ app.post('/fulfillment', (req, res) => {
         });
     }
 
-    // Réponse par défaut
     res.json({ requestId, payload: {} });
 });
 
