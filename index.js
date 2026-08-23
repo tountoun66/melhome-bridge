@@ -7,7 +7,7 @@ app.use(express.json());
 
 const pairCodes = {}; 
 
-// --- 1. LE "SUPER EXTRACTEUR" DE DONNÉES ---
+// --- 1. L'EXTRACTION ROBUSTE (Inspirée de votre application) ---
 function extractXsrf(cookieStr) {
     const match = cookieStr.match(/XSRF-TOKEN=([^;]+)/i);
     if (match) {
@@ -138,7 +138,7 @@ app.all('/oauth/token', (req, res) => {
     res.json({ access_token: accessToken, token_type: "Bearer", expires_in: 31536000 });
 });
 
-// --- 4. LE FULFILLMENT ---
+// --- 4. LE FULFILLMENT (Traduction Google -> Votre logique Kotlin) ---
 app.post('/fulfillment', async (req, res) => {
     const body = req.body;
     const requestId = body?.requestId;
@@ -220,56 +220,40 @@ app.post('/fulfillment', async (req, res) => {
                     const currentDeviceData = clims.find(c => (c.id || c.ID).toString() === climId);
                     if (!currentDeviceData) continue;
 
-                    // COPIE COMPLÈTE DE L'OBJET (Exactement comme dans votre application Android)
-                    let payloadJson = JSON.parse(JSON.stringify(currentDeviceData)); 
+                    // COPIE EXACTE DU COMPORTEMENT DE VOTRE KOTLIN (jsonMap.putAll(device))
+                    let jsonMap = JSON.parse(JSON.stringify(currentDeviceData)); 
                     
                     command.execution.forEach(exec => {
                         if (exec.command === 'action.devices.commands.OnOff') {
-                            payloadJson.power = exec.params.on;
+                            jsonMap.power = exec.params.on;
                         }
                         if (exec.command === 'action.devices.commands.ThermostatTemperatureSetpoint') {
-                            payloadJson.setTemperature = exec.params.thermostatTemperatureSetpoint;
+                            jsonMap.setTemperature = exec.params.thermostatTemperatureSetpoint;
                         }
                         if (exec.command === 'action.devices.commands.ThermostatSetMode') {
                             const mode = exec.params.thermostatMode;
                             if (mode === "off") {
-                                payloadJson.power = false;
+                                jsonMap.power = false;
                             } else {
-                                payloadJson.power = true;
-                                if (mode === "cool") payloadJson.operationMode = "Cool";
-                                if (mode === "heat") payloadJson.operationMode = "Heat";
-                                if (mode === "dry") payloadJson.operationMode = "Dry";
-                                if (mode === "fan-only") payloadJson.operationMode = "Fan";
-                                if (mode === "auto") payloadJson.operationMode = "Automatic";
+                                jsonMap.power = true;
+                                if (mode === "cool") jsonMap.operationMode = "Cool";
+                                if (mode === "heat") jsonMap.operationMode = "Heat";
+                                if (mode === "dry") jsonMap.operationMode = "Dry";
+                                if (mode === "fan-only") jsonMap.operationMode = "Fan";
+                                if (mode === "auto") jsonMap.operationMode = "Automatic";
                             }
                         }
-                        // MISE À JOUR DE LA VENTILATION DANS LE PAQUET COMPLET
+                        // Traduction directe de la commande FanSpeed de Google vers votre variable setFanSpeed
                         if (exec.command === 'action.devices.commands.FanSpeed') {
                             const speedStr = exec.params.fanSpeed;
-                            const newFanVal = (speedStr === "auto") ? 0 : parseInt(speedStr, 10);
-                            
-                            // On met à jour la variable à la racine si elle existe
-                            payloadJson.setFanSpeed = newFanVal;
-                            
-                            // On met aussi à jour dans les tableaux settings/unitSettings si Mitsubishi les utilise
-                            ['settings', 'unitSettings'].forEach(containerKey => {
-                                if (Array.isArray(payloadJson[containerKey])) {
-                                    payloadJson[containerKey].forEach(item => {
-                                        const itemName = String(item.name || item.Name || "").toLowerCase();
-                                        if (itemName.includes("fanspeed")) {
-                                            item.value = newFanVal;
-                                            item.Value = newFanVal;
-                                        }
-                                    });
-                                }
-                            });
-
-                            payloadJson.power = true; // S'assure que la clim est allumée
+                            jsonMap.setFanSpeed = (speedStr === "auto") ? 0 : parseInt(speedStr, 10);
+                            jsonMap.power = true; // S'assure que l'appareil est sous tension
                         }
                     });
 
-                    console.log(`=== ENVOI REQUÊTE PUT CLIM ${climId} ===`, JSON.stringify(payloadJson));
+                    console.log(`=== REQUÊTE PUT MITSUBISHI (CLIM ${climId}) ===`, JSON.stringify(jsonMap));
 
+                    // REQUÊTE IDENTIQUE À VOTRE APP ANDROID (sendAtaunitCommand)
                     await fetch(`https://melcloudhome.com/api/ataunit/${climId}`, {
                         method: 'PUT',
                         headers: {
@@ -280,7 +264,7 @@ app.post('/fulfillment', async (req, res) => {
                             "X-Requested-With": "XMLHttpRequest",
                             "Accept": "application/json, text/plain, */*"
                         },
-                        body: JSON.stringify(payloadJson)
+                        body: JSON.stringify(jsonMap)
                     });
                 }
             }
