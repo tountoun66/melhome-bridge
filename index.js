@@ -220,7 +220,8 @@ app.post('/fulfillment', async (req, res) => {
                     const currentDeviceData = clims.find(c => (c.id || c.ID).toString() === climId);
                     if (!currentDeviceData) continue;
 
-                    let payloadJson = { ...currentDeviceData }; 
+                    // COPIE COMPLÈTE DE L'OBJET (Exactement comme dans votre application Android)
+                    let payloadJson = JSON.parse(JSON.stringify(currentDeviceData)); 
                     
                     command.execution.forEach(exec => {
                         if (exec.command === 'action.devices.commands.OnOff') {
@@ -242,17 +243,32 @@ app.post('/fulfillment', async (req, res) => {
                                 if (mode === "auto") payloadJson.operationMode = "Automatic";
                             }
                         }
-                        // CORRECTION CRITIQUE DE LA VENTILATION : Forçage en nombre entier
+                        // MISE À JOUR DE LA VENTILATION DANS LE PAQUET COMPLET
                         if (exec.command === 'action.devices.commands.FanSpeed') {
                             const speedStr = exec.params.fanSpeed;
-                            payloadJson.setFanSpeed = (speedStr === "auto") ? 0 : parseInt(speedStr, 10);
-                            // On s'assure que la clim est active pour accepter la vitesse
-                            payloadJson.power = true; 
+                            const newFanVal = (speedStr === "auto") ? 0 : parseInt(speedStr, 10);
+                            
+                            // On met à jour la variable à la racine si elle existe
+                            payloadJson.setFanSpeed = newFanVal;
+                            
+                            // On met aussi à jour dans les tableaux settings/unitSettings si Mitsubishi les utilise
+                            ['settings', 'unitSettings'].forEach(containerKey => {
+                                if (Array.isArray(payloadJson[containerKey])) {
+                                    payloadJson[containerKey].forEach(item => {
+                                        const itemName = String(item.name || item.Name || "").toLowerCase();
+                                        if (itemName.includes("fanspeed")) {
+                                            item.value = newFanVal;
+                                            item.Value = newFanVal;
+                                        }
+                                    });
+                                }
+                            });
+
+                            payloadJson.power = true; // S'assure que la clim est allumée
                         }
                     });
 
-                    // Log pour espionner l'ordre exact envoyé à Mitsubishi dans les logs de Render
-                    console.log(`=== ENVOI COMMANDE CLIM ${climId} ===`, JSON.stringify(payloadJson));
+                    console.log(`=== ENVOI REQUÊTE PUT CLIM ${climId} ===`, JSON.stringify(payloadJson));
 
                     await fetch(`https://melcloudhome.com/api/ataunit/${climId}`, {
                         method: 'PUT',
