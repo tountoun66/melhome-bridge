@@ -52,25 +52,16 @@ function getTemp(clim) {
     return (!isNaN(num) && num > 0 && num < 60) ? num : 20.0;
 }
 
-// Lecture intelligente du mode et de la vitesse pour les afficher dans Google Home
 function getGoogleMode(clim) {
     if (!isPoweredOn(clim)) return "off"; 
     
-    const opMode = String(getSetting(clim, ["operationMode", "OperationMode"]) || "Automatic").toLowerCase();
-    const fanVal = getSetting(clim, ["setFanSpeed", "SetFanSpeed", "fanSpeed", "FanSpeed"]);
-
-    if (opMode.includes("fan")) return "fan-only";
+    const val = getSetting(clim, ["operationMode", "OperationMode"]);
+    const mode = String(val || "Automatic").toLowerCase();
     
-    // Si une vitesse spécifique est active, on l'affiche comme mode dédié
-    if (fanVal === 1 || fanVal === "One") return "speed_1";
-    if (fanVal === 2 || fanVal === "Two") return "speed_2";
-    if (fanVal === 3 || fanVal === "Three") return "speed_3";
-    if (fanVal === 4 || fanVal === "Four") return "speed_4";
-    if (fanVal === 5 || fanVal === "Five") return "speed_5";
-
-    if (opMode.includes("cool")) return "cool";
-    if (opMode.includes("heat")) return "heat";
-    if (opMode.includes("dry")) return "dry";
+    if (mode.includes("cool")) return "cool";
+    if (mode.includes("heat")) return "heat";
+    if (mode.includes("dry")) return "dry";
+    if (mode.includes("fan")) return "fan-only";
     return "auto";
 }
 
@@ -99,7 +90,7 @@ app.post('/api/save-cookie', (req, res) => {
     if (!cookie) return res.status(400).json({ error: "Cookie manquant" });
     const pairCode = Math.floor(1000 + Math.random() * 9000).toString();
     pairCodes[pairCode] = cookie;
-    pairCodes["master_cookie"] = cookie;
+    pairCodes["master_cookie"] = cookie; // Sécurité persistante anti-perte de lien
     res.json({ success: true, pairCode: pairCode });
 });
 
@@ -173,8 +164,7 @@ app.post('/fulfillment', async (req, res) => {
                 name: { name: clim.givenDisplayName || clim.GivenDisplayName || "Climatiseur" },
                 willReportState: false,
                 attributes: { 
-                    // On expose toutes les vitesses sous forme de modes gérés de manière native par Google
-                    availableThermostatModes: "off,on,heat,cool,dry,fan-only,auto,speed_1,speed_2,speed_3,speed_4,speed_5", 
+                    availableThermostatModes: "off,on,heat,cool,dry,fan-only,auto", 
                     thermostatTemperatureUnit: "C" 
                 }
             }));
@@ -229,37 +219,15 @@ app.post('/fulfillment', async (req, res) => {
                                 if (mode === "cool") payloadJson.operationMode = "Cool";
                                 if (mode === "heat") payloadJson.operationMode = "Heat";
                                 if (mode === "dry") payloadJson.operationMode = "Dry";
-                                if (mode === "fan-only") {
-                                    payloadJson.operationMode = "Fan";
-                                } else if (mode.startsWith("speed_")) {
-                                    // Traduction propre du mode Google vers la vitesse texte de Mitsubishi
-                                    const speedNum = parseInt(mode.replace("speed_", ""), 10);
-                                    const speedTexts = ["", "One", "Two", "Three", "Four", "Five"];
-                                    payloadJson.setFanSpeed = speedTexts[speedNum] || "One";
-                                    
-                                    // Mise à jour de sécurité dans les tableaux de configuration internes
-                                    ['settings', 'unitSettings'].forEach(containerKey => {
-                                        if (Array.isArray(payloadJson[containerKey])) {
-                                            payloadJson[containerKey].forEach(item => {
-                                                const itemName = String(item.name || item.Name || "").toLowerCase();
-                                                if (itemName.includes("fanspeed")) {
-                                                    item.value = payloadJson.setFanSpeed;
-                                                    item.Value = payloadJson.setFanSpeed;
-                                                }
-                                            });
-                                        }
-                                    });
-                                } else if (mode === "auto") {
-                                    payloadJson.operationMode = "Automatic";
-                                    payloadJson.setFanSpeed = 0;
-                                }
+                                if (mode === "fan-only") payloadJson.operationMode = "Fan";
+                                if (mode === "auto") payloadJson.operationMode = "Automatic";
                             }
                         }
                     });
 
                     await fetch(`https://melcloudhome.com/api/ataunit/${climId}`, {
                         method: 'PUT',
-                        headers: {
+                    headers: {
                             "Content-Type": "application/json; charset=utf-8",
                             "Cookie": safeCookie,
                             "X-XSRF-TOKEN": xsrf,
