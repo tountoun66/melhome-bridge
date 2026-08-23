@@ -6,6 +6,7 @@ app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 
 const pairCodes = {}; 
+const lastFanSpeedCache = {}; // Mémoire cache pour valider instantanément l'affichage dans Google Home
 
 function extractXsrf(cookieStr) {
     const match = cookieStr.match(/XSRF-TOKEN=([^;]+)/i);
@@ -52,8 +53,11 @@ function getTemp(clim) {
     return (!isNaN(num) && num > 0 && num < 60) ? num : 20.0;
 }
 
-// Convertit la vitesse Mitsubishi en format universel Google
-function getGoogleFanSpeed(clim) {
+function getGoogleFanSpeed(clim, climId) {
+    // Si on a un cache récent pour cet appareil, on l'utilise pour garantir la fluidité
+    if (lastFanSpeedCache[climId]) {
+        return lastFanSpeedCache[climId];
+    }
     const val = getSetting(clim, ["setFanSpeed", "SetFanSpeed", "fanSpeed", "FanSpeed"]);
     if (val === undefined || val === null) return "auto";
     const str = String(val).toLowerCase();
@@ -66,7 +70,6 @@ function getGoogleFanSpeed(clim) {
     return "auto";
 }
 
-// Convertit la vitesse Google vers le texte attendu par Mitsubishi
 function parseGoogleFanSpeedToMitsubishi(googleSpeed) {
     switch (googleSpeed) {
         case "low": return "One";
@@ -179,7 +182,6 @@ app.post('/fulfillment', async (req, res) => {
     if (!userCookie) return res.status(401).send("Jeton invalide");
 
     try {
-        // SYNC : Utilisation de la nomenclature officielle Google Home pour les vitesses
         if (intent === 'action.devices.SYNC') {
             const clims = await fetchMelcloudDevices(userCookie);
             const googleDevices = clims.map(clim => ({
@@ -212,14 +214,13 @@ app.post('/fulfillment', async (req, res) => {
             return res.json({ requestId, payload: { agentUserId: "melhome_user", devices: googleDevices } });
         }
 
-        // QUERY : Renvoie le format standard Google
         if (intent === 'action.devices.QUERY') {
             const clims = await fetchMelcloudDevices(userCookie);
             const devicesState = {};
 
             clims.forEach(clim => {
                 const id = (clim.id || clim.ID).toString();
-                const fanName = getGoogleFanSpeed(clim); // Renvoie "auto", "low", "medium"...
+                const fanName = getGoogleFanSpeed(clim, id);
 
                 devicesState[id] = {
                     online: true,
@@ -234,7 +235,6 @@ app.post('/fulfillment', async (req, res) => {
             return res.json({ requestId, payload: { devices: devicesState } });
         }
 
-        // EXECUTE : Convertit le format Google en texte Mitsubishi ("One", "Two"...)
         if (intent === 'action.devices.EXECUTE') {
             const commands = body.inputs[0].payload.commands;
             const clims = await fetchMelcloudDevices(userCookie);
@@ -269,15 +269,17 @@ app.post('/fulfillment', async (req, res) => {
                                 if (mode === "auto") payloadJson.operationMode = "Automatic";
                             }
                         }
-                        // Traduction de la vitesse Google vers le format textuel de Mitsubishi ("One", "Two"...)
                         if (exec.command === 'action.devices.commands.FanSpeed') {
                             const googleSpeed = exec.params.fanSpeed; // ex: "low", "medium", "high"
-                            const mitsubishiSpeedText = parseGoogleFanSpeedToMitsubishi(googleSpeed); // "One", "Two"...
+                            const mitsubishiSpeedText = parseGoogleFanSpeedToMitsubishi(googleSpeed);
                             
+                            // On stocke immédiatement dans le cache pour que le QUERY suivant valide le choix
+                            lastFanSpeedCache[climId] = googleSpeed;
+                            setTimeout(() => { delete lastFanSpeedCache[climId]; }, 10000); // Nettoyage du cache après 10s
+
                             payloadJson.setFanSpeed = mitsubishiSpeedText;
                             payloadJson.power = true;
                             
-                            // Mise à jour de sécurité dans les tableaux de configuration internes
                             ['settings', 'unitSettings'].forEach(containerKey => {
                                 if (Array.isArray(payloadJson[containerKey])) {
                                     payloadJson[containerKey].forEach(item => {
