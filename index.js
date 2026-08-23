@@ -52,10 +52,15 @@ function getTemp(clim) {
     return (!isNaN(num) && num > 0 && num < 60) ? num : 20.0;
 }
 
-function getFanSpeed(clim) {
+// Lecture de la vitesse renvoyée par Mitsubishi
+function getFanSpeedName(clim) {
     const val = getSetting(clim, ["setFanSpeed", "SetFanSpeed", "fanSpeed", "FanSpeed"]);
-    const num = parseInt(val, 10);
-    return (!isNaN(num) && num >= 0 && num <= 5) ? num : 0;
+    if (val === undefined || val === null) return "Auto";
+    // Si c'est déjà du texte (ex: "One", "Two", "Auto")
+    if (typeof val === 'string') return val;
+    // Si c'est un nombre (0, 1, 2...)
+    const mapNumToText = ["Auto", "One", "Two", "Three", "Four", "Five"];
+    return mapNumToText[parseInt(val, 10)] || "Auto";
 }
 
 function getGoogleMode(clim) {
@@ -159,6 +164,7 @@ app.post('/fulfillment', async (req, res) => {
     if (!userCookie) return res.status(401).send("Jeton invalide");
 
     try {
+        // SYNC : On déclare les vitesses textuelles exactes attendues par l'API
         if (intent === 'action.devices.SYNC') {
             const clims = await fetchMelcloudDevices(userCookie);
             const googleDevices = clims.map(clim => ({
@@ -177,12 +183,12 @@ app.post('/fulfillment', async (req, res) => {
                     commandOnlyFanSpeed: false,
                     availableFanSpeeds: {
                         speeds: [
-                            { speed_name: "s1", speed_values: [{ lang_format: "en", speed_synonym: ["speed 1", "one", "1"] }, { lang_format: "fr", speed_synonym: ["vitesse 1", "un", "1"] }] },
-                            { speed_name: "s2", speed_values: [{ lang_format: "en", speed_synonym: ["speed 2", "two", "2"] }, { lang_format: "fr", speed_synonym: ["vitesse 2", "deux", "2"] }] },
-                            { speed_name: "s3", speed_values: [{ lang_format: "en", speed_synonym: ["speed 3", "three", "3"] }, { lang_format: "fr", speed_synonym: ["vitesse 3", "trois", "3"] }] },
-                            { speed_name: "s4", speed_values: [{ lang_format: "en", speed_synonym: ["speed 4", "four", "4"] }, { lang_format: "fr", speed_synonym: ["vitesse 4", "quatre", "4"] }] },
-                            { speed_name: "s5", speed_values: [{ lang_format: "en", speed_synonym: ["speed 5", "five", "5"] }, { lang_format: "fr", speed_synonym: ["vitesse 5", "cinq", "5"] }] },
-                            { speed_name: "auto", speed_values: [{ lang_format: "en", speed_synonym: ["auto", "automatic"] }, { lang_format: "fr", speed_synonym: ["auto", "automatique"] }] }
+                            { speed_name: "Auto", speed_values: [{ lang_format: "en", speed_synonym: ["auto", "automatic"] }, { lang_format: "fr", speed_synonym: ["auto", "automatique"] }] },
+                            { speed_name: "One", speed_values: [{ lang_format: "en", speed_synonym: ["speed 1", "one", "1"] }, { lang_format: "fr", speed_synonym: ["vitesse 1", "un", "1"] }] },
+                            { speed_name: "Two", speed_values: [{ lang_format: "en", speed_synonym: ["speed 2", "two", "2"] }, { lang_format: "fr", speed_synonym: ["vitesse 2", "deux", "2"] }] },
+                            { speed_name: "Three", speed_values: [{ lang_format: "en", speed_synonym: ["speed 3", "three", "3"] }, { lang_format: "fr", speed_synonym: ["vitesse 3", "trois", "3"] }] },
+                            { speed_name: "Four", speed_values: [{ lang_format: "en", speed_synonym: ["speed 4", "four", "4"] }, { lang_format: "fr", speed_synonym: ["vitesse 4", "quatre", "4"] }] },
+                            { speed_name: "Five", speed_values: [{ lang_format: "en", speed_synonym: ["speed 5", "five", "5"] }, { lang_format: "fr", speed_synonym: ["vitesse 5", "cinq", "5"] }] }
                         ],
                         ordered: true
                     }
@@ -191,15 +197,14 @@ app.post('/fulfillment', async (req, res) => {
             return res.json({ requestId, payload: { agentUserId: "melhome_user", devices: googleDevices } });
         }
 
+        // QUERY : On renvoie le nom exact (One, Two...) à Google
         if (intent === 'action.devices.QUERY') {
             const clims = await fetchMelcloudDevices(userCookie);
             const devicesState = {};
 
             clims.forEach(clim => {
                 const id = (clim.id || clim.ID).toString();
-                const fanVal = getFanSpeed(clim);
-                // On mappe le chiffre vers le nom de vitesse déclaré dans SYNC
-                const fanName = (fanVal === 0 || fanVal === null) ? "auto" : `s${fanVal}`;
+                const fanName = getFanSpeedName(clim); // Renvoie "Auto", "One", "Two"...
 
                 devicesState[id] = {
                     online: true,
@@ -214,6 +219,7 @@ app.post('/fulfillment', async (req, res) => {
             return res.json({ requestId, payload: { devices: devicesState } });
         }
 
+        // EXECUTE : On transmet directement le texte ("One", "Two"...) à Mitsubishi
         if (intent === 'action.devices.EXECUTE') {
             const commands = body.inputs[0].payload.commands;
             const clims = await fetchMelcloudDevices(userCookie);
@@ -248,24 +254,21 @@ app.post('/fulfillment', async (req, res) => {
                                 if (mode === "auto") payloadJson.operationMode = "Automatic";
                             }
                         }
-                        // Traduction de "s1", "s2"... ou "auto" vers le chiffre ou format attendu par Mitsubishi
+                        // Ici, exec.params.fanSpeed renvoie directement "One", "Two", "Auto"...
                         if (exec.command === 'action.devices.commands.FanSpeed') {
-                            const speedStr = exec.params.fanSpeed; // ex: "s1", "auto"
-                            let targetFan = 0;
-                            if (speedStr.startsWith("s")) {
-                                targetFan = parseInt(speedStr.replace("s", ""), 10);
-                            }
-
-                            payloadJson.setFanSpeed = targetFan;
+                            const targetFanText = exec.params.fanSpeed; // ex: "One", "Two", "Auto"
+                            
+                            payloadJson.setFanSpeed = targetFanText;
                             payloadJson.power = true;
                             
+                            // Mise à jour de sécurité dans les tableaux de configuration internes
                             ['settings', 'unitSettings'].forEach(containerKey => {
                                 if (Array.isArray(payloadJson[containerKey])) {
                                     payloadJson[containerKey].forEach(item => {
                                         const itemName = String(item.name || item.Name || "").toLowerCase();
                                         if (itemName.includes("fanspeed")) {
-                                            item.value = targetFan;
-                                            item.Value = targetFan;
+                                            item.value = targetFanText;
+                                            item.Value = targetFanText;
                                         }
                                     });
                                 }
