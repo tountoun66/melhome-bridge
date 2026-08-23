@@ -7,7 +7,6 @@ app.use(express.json());
 
 const pairCodes = {}; 
 
-// --- 1. L'EXTRACTION ROBUSTE (Inspirée de votre application) ---
 function extractXsrf(cookieStr) {
     const match = cookieStr.match(/XSRF-TOKEN=([^;]+)/i);
     if (match) {
@@ -72,7 +71,6 @@ function getGoogleMode(clim) {
     return "auto";
 }
 
-// --- 2. FONCTIONS RÉSEAU MITSUBISHI ---
 async function fetchMelcloudDevices(cookie) {
     const xsrf = extractXsrf(cookie);
     const safeCookie = cookie.trim().replace(/\n|\r/g, "");
@@ -93,7 +91,6 @@ async function fetchMelcloudDevices(cookie) {
     return (data.buildings && data.buildings.length > 0) ? (data.buildings[0].airToAirUnits || []) : [];
 }
 
-// --- 3. ROUTES D'ASSOCIATION ---
 app.post('/api/save-cookie', (req, res) => {
     const { cookie } = req.body;
     if (!cookie) return res.status(400).json({ error: "Cookie manquant" });
@@ -138,7 +135,6 @@ app.all('/oauth/token', (req, res) => {
     res.json({ access_token: accessToken, token_type: "Bearer", expires_in: 31536000 });
 });
 
-// --- 4. LE FULFILLMENT (Traduction Google -> Votre logique Kotlin) ---
 app.post('/fulfillment', async (req, res) => {
     const body = req.body;
     const requestId = body?.requestId;
@@ -220,7 +216,6 @@ app.post('/fulfillment', async (req, res) => {
                     const currentDeviceData = clims.find(c => (c.id || c.ID).toString() === climId);
                     if (!currentDeviceData) continue;
 
-                    // COPIE EXACTE DU COMPORTEMENT DE VOTRE KOTLIN (jsonMap.putAll(device))
                     let jsonMap = JSON.parse(JSON.stringify(currentDeviceData)); 
                     
                     command.execution.forEach(exec => {
@@ -243,18 +238,30 @@ app.post('/fulfillment', async (req, res) => {
                                 if (mode === "auto") jsonMap.operationMode = "Automatic";
                             }
                         }
-                        // Traduction directe de la commande FanSpeed de Google vers votre variable setFanSpeed
                         if (exec.command === 'action.devices.commands.FanSpeed') {
                             const speedStr = exec.params.fanSpeed;
-                            jsonMap.setFanSpeed = (speedStr === "auto") ? 0 : parseInt(speedStr, 10);
-                            jsonMap.power = true; // S'assure que l'appareil est sous tension
+                            const targetFan = (speedStr === "auto") ? 0 : parseInt(speedStr, 10);
+                            
+                            // On modifie à la racine
+                            jsonMap.setFanSpeed = targetFan;
+                            
+                            // On cherche également dans le tableau des settings si Mitsubishi l'attend là-bas
+                            ['settings', 'unitSettings'].forEach(containerKey => {
+                                if (Array.isArray(jsonMap[containerKey])) {
+                                    jsonMap[containerKey].forEach(item => {
+                                        const itemName = String(item.name || item.Name || "").toLowerCase();
+                                        if (itemName.includes("fanspeed")) {
+                                            item.value = targetFan;
+                                            item.Value = targetFan;
+                                        }
+                                    });
+                                }
+                            });
                         }
                     });
 
-                    console.log(`=== REQUÊTE PUT MITSUBISHI (CLIM ${climId}) ===`, JSON.stringify(jsonMap));
-
-                    // REQUÊTE IDENTIQUE À VOTRE APP ANDROID (sendAtaunitCommand)
-                    await fetch(`https://melcloudhome.com/api/ataunit/${climId}`, {
+                    // MOUCHARD DE TEST : On intercepte la réponse exacte de Mitsubishi
+                    const mitsubishiResponse = await fetch(`https://melcloudhome.com/api/ataunit/${climId}`, {
                         method: 'PUT',
                         headers: {
                             "Content-Type": "application/json; charset=utf-8",
@@ -266,6 +273,9 @@ app.post('/fulfillment', async (req, res) => {
                         },
                         body: JSON.stringify(jsonMap)
                     });
+
+                    const responseText = await mitsubishiResponse.text();
+                    console.log(`=== RÉPONSE MITSUBISHI (Statut ${mitsubishiResponse.status}) ===`, responseText);
                 }
             }
             return res.json({ requestId, payload: { commands: commands.map(c => ({ ids: c.devices.map(d => d.id), status: "SUCCESS" })) } });
