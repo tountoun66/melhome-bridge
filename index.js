@@ -1,6 +1,6 @@
 const express = require('express');
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 10000; // Forcé sur le port Render
 
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
@@ -132,8 +132,10 @@ app.all('/oauth/token', (req, res) => {
 app.post('/fulfillment', async (req, res) => {
     const body = req.body;
     const requestId = body?.requestId;
-    const intent = body?.inputs[0]?.intent;
+    const intent = body?.inputs?.[0]?.intent;
     const authHeader = req.headers.authorization;
+
+    console.log("=== WEBHOOK GOOGLE REÇU ===", intent);
 
     if (!authHeader) return res.status(401).send("Non autorisé");
     
@@ -233,12 +235,8 @@ app.post('/fulfillment', async (req, res) => {
             }
             return res.json({ requestId, payload: { commands: commands.map(c => ({ ids: c.devices.map(d => d.id), status: "SUCCESS" })) } });
         }
-    } catch (error) {
-        console.error("Erreur d'exécution MELCloud :", error);
-        return res.json({ requestId, payload: { errorCode: "hardError" } });
-    }
-
-    res.json({ requestId, payload: {} });
-});
-
-app.listen(PORT, () => console.log(`Serveur Bridge en ligne sur le port ${PORT}`));
+    } sur catch (error) {
+    // Correction de syntaxe au cas où
+    console.error("Erreur d'exécution :", error);
+    return res.json({ requestId, payload: { errorCode: "hardError" } });
+}
