@@ -65,7 +65,6 @@ function getGoogleMode(clim) {
     return "auto";
 }
 
-// Récupère la vitesse exacte et la transforme en valeur attendue par notre déclaration Google
 function getGoogleFanSpeed(clim) {
     const val = getSetting(clim, ["setFanSpeed", "SetFanSpeed", "fanSpeed", "FanSpeed"]);
     if (val === undefined || val === null) return "Auto";
@@ -185,7 +184,6 @@ app.post('/fulfillment', async (req, res) => {
                     commandOnlyFanSpeed: false,
                     availableFanSpeeds: {
                         speeds: [
-                            // CORRECTION : "lang" au lieu de "lang_format" !
                             { speed_name: "Auto", speed_values: [{ lang: "fr", speed_synonym: ["Auto", "Automatique"] }, { lang: "en", speed_synonym: ["Auto", "Automatic"] }] },
                             { speed_name: "One", speed_values: [{ lang: "fr", speed_synonym: ["Vitesse 1", "1", "Un"] }, { lang: "en", speed_synonym: ["Speed 1", "1", "One"] }] },
                             { speed_name: "Two", speed_values: [{ lang: "fr", speed_synonym: ["Vitesse 2", "2", "Deux"] }, { lang: "en", speed_synonym: ["Speed 2", "2", "Two"] }] },
@@ -233,9 +231,18 @@ app.post('/fulfillment', async (req, res) => {
                     const currentDeviceData = clims.find(c => (c.id || c.ID).toString() === climId);
                     if (!currentDeviceData) continue;
 
-                    let payloadJson = { ...currentDeviceData }; 
-                    
-                    // CORRECTION : On prépare l'état mis à jour à renvoyer à Google Home
+                    // LE SECRET EST ICI : Le paquet partiel identique à votre capture d'écran !
+                    let payloadJson = {
+                        power: null,
+                        operationMode: null,
+                        setFanSpeed: null,
+                        setTemperature: null,
+                        vaneHorizontalDirection: null,
+                        vaneVerticalDirection: null,
+                        temperatureIncrementOverride: null,
+                        inStandbyMode: null
+                    };
+
                     let updatedStates = {
                         online: true,
                         thermostatMode: getGoogleMode(currentDeviceData),
@@ -258,7 +265,8 @@ app.post('/fulfillment', async (req, res) => {
                             if (mode === "off") {
                                 payloadJson.power = false;
                             } else {
-                                payloadJson.power = true;
+                                // On ne force pas "power = true" pour que le paquet reste minimal, sauf si la clim était éteinte
+                                if (!isPoweredOn(currentDeviceData)) payloadJson.power = true;
                                 if (mode === "cool") payloadJson.operationMode = "Cool";
                                 if (mode === "heat") payloadJson.operationMode = "Heat";
                                 if (mode === "dry") payloadJson.operationMode = "Dry";
@@ -267,26 +275,9 @@ app.post('/fulfillment', async (req, res) => {
                             }
                         }
                         if (exec.command === 'action.devices.commands.FanSpeed') {
-                            const targetSpeed = exec.params.fanSpeed; // Vaut "One", "Two", "Auto"...
-                            
-                            // On injecte directement dans la réponse pour figer le curseur
-                            updatedStates.currentFanSpeedSetting = targetSpeed;
-                            if (updatedStates.thermostatMode === "off") updatedStates.thermostatMode = "auto";
-                            
+                            const targetSpeed = exec.params.fanSpeed; // "One", "Two", "Three"...
                             payloadJson.setFanSpeed = targetSpeed;
-                            payloadJson.power = true;
-                            
-                            ['settings', 'unitSettings'].forEach(containerKey => {
-                                if (Array.isArray(payloadJson[containerKey])) {
-                                    payloadJson[containerKey].forEach(item => {
-                                        const itemName = String(item.name || item.Name || "").toLowerCase();
-                                        if (itemName.includes("fanspeed")) {
-                                            item.value = targetSpeed;
-                                            item.Value = targetSpeed;
-                                        }
-                                    });
-                                }
-                            });
+                            updatedStates.currentFanSpeedSetting = targetSpeed;
                         }
                     });
 
@@ -300,10 +291,9 @@ app.post('/fulfillment', async (req, res) => {
                             "X-Requested-With": "XMLHttpRequest",
                             "Accept": "application/json, text/plain, */*"
                         },
-                        body: JSON.stringify(payloadJson)
+                        body: JSON.stringify(payloadJson) // On n'envoie QUE ce qui est nécessaire !
                     });
 
-                    // CORRECTION : L'astuce Home Assistant. Renvoyer l'état mis à jour fige l'interface de Google Home
                     responseCommands.push({
                         ids: [climId],
                         status: "SUCCESS",
