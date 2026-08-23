@@ -6,8 +6,6 @@ app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 
 const pairCodes = {}; 
-// Le fameux cache pour valider immédiatement le mouvement dans Google Home
-const fanSpeedCache = {}; 
 
 function extractXsrf(cookieStr) {
     const match = cookieStr.match(/XSRF-TOKEN=([^;]+)/i);
@@ -54,41 +52,6 @@ function getTemp(clim) {
     return (!isNaN(num) && num > 0 && num < 60) ? num : 20.0;
 }
 
-// -------------------------------------------------------------
-// GESTION INTELLIGENTE DE LA VENTILATION (AVEC CACHE)
-// -------------------------------------------------------------
-function getGoogleFanSpeed(clim, climId) {
-    // 1. Vérifie si on vient juste de changer la vitesse (cache valable 15 secondes)
-    if (fanSpeedCache[climId] && (Date.now() - fanSpeedCache[climId].timestamp < 15000)) {
-        return fanSpeedCache[climId].value;
-    }
-
-    // 2. Sinon, on lit la vraie valeur sur la clim
-    const val = getSetting(clim, ["setFanSpeed", "SetFanSpeed", "fanSpeed", "FanSpeed"]);
-    if (val === undefined || val === null) return "auto";
-    const str = String(val).toLowerCase();
-    
-    // On convertit le retour de Mitsubishi vers notre standard (1, 2, 3...)
-    if (str === "one" || str === "1") return "1";
-    if (str === "two" || str === "2") return "2";
-    if (str === "three" || str === "3") return "3";
-    if (str === "four" || str === "4") return "4";
-    if (str === "five" || str === "5") return "5";
-    return "auto";
-}
-
-function parseGoogleToMelcloudFan(googleSpeed) {
-    switch(String(googleSpeed)) {
-        case "1": return "One";
-        case "2": return "Two";
-        case "3": return "Three";
-        case "4": return "Four";
-        case "5": return "Five";
-        default: return "Auto";
-    }
-}
-// -------------------------------------------------------------
-
 function getGoogleMode(clim) {
     if (!isPoweredOn(clim)) return "off"; 
     
@@ -100,6 +63,20 @@ function getGoogleMode(clim) {
     if (mode.includes("dry")) return "dry";
     if (mode.includes("fan")) return "fan-only";
     return "auto";
+}
+
+// Récupère la vitesse exacte et la transforme en valeur attendue par notre déclaration Google
+function getGoogleFanSpeed(clim) {
+    const val = getSetting(clim, ["setFanSpeed", "SetFanSpeed", "fanSpeed", "FanSpeed"]);
+    if (val === undefined || val === null) return "Auto";
+    const str = String(val).toLowerCase();
+    
+    if (str.includes("one") || str === "1") return "One";
+    if (str.includes("two") || str === "2") return "Two";
+    if (str.includes("three") || str === "3") return "Three";
+    if (str.includes("four") || str === "4") return "Four";
+    if (str.includes("five") || str === "5") return "Five";
+    return "Auto";
 }
 
 async function fetchMelcloudDevices(cookie) {
@@ -205,14 +182,16 @@ app.post('/fulfillment', async (req, res) => {
                     availableThermostatModes: "off,on,heat,cool,dry,fan-only,auto", 
                     thermostatTemperatureUnit: "C",
                     supportsFanSpeedPercent: false,
+                    commandOnlyFanSpeed: false,
                     availableFanSpeeds: {
                         speeds: [
-                            { speed_name: "auto", speed_values: [{ lang_format: "fr", speed_synonym: ["auto", "automatique"] }, { lang_format: "en", speed_synonym: ["auto", "automatic"] }] },
-                            { speed_name: "1", speed_values: [{ lang_format: "fr", speed_synonym: ["1", "vitesse 1", "un"] }, { lang_format: "en", speed_synonym: ["1", "speed 1", "one"] }] },
-                            { speed_name: "2", speed_values: [{ lang_format: "fr", speed_synonym: ["2", "vitesse 2", "deux"] }, { lang_format: "en", speed_synonym: ["2", "speed 2", "two"] }] },
-                            { speed_name: "3", speed_values: [{ lang_format: "fr", speed_synonym: ["3", "vitesse 3", "trois"] }, { lang_format: "en", speed_synonym: ["3", "speed 3", "three"] }] },
-                            { speed_name: "4", speed_values: [{ lang_format: "fr", speed_synonym: ["4", "vitesse 4", "quatre"] }, { lang_format: "en", speed_synonym: ["4", "speed 4", "four"] }] },
-                            { speed_name: "5", speed_values: [{ lang_format: "fr", speed_synonym: ["5", "vitesse 5", "cinq"] }, { lang_format: "en", speed_synonym: ["5", "speed 5", "five"] }] }
+                            // CORRECTION : "lang" au lieu de "lang_format" !
+                            { speed_name: "Auto", speed_values: [{ lang: "fr", speed_synonym: ["Auto", "Automatique"] }, { lang: "en", speed_synonym: ["Auto", "Automatic"] }] },
+                            { speed_name: "One", speed_values: [{ lang: "fr", speed_synonym: ["Vitesse 1", "1", "Un"] }, { lang: "en", speed_synonym: ["Speed 1", "1", "One"] }] },
+                            { speed_name: "Two", speed_values: [{ lang: "fr", speed_synonym: ["Vitesse 2", "2", "Deux"] }, { lang: "en", speed_synonym: ["Speed 2", "2", "Two"] }] },
+                            { speed_name: "Three", speed_values: [{ lang: "fr", speed_synonym: ["Vitesse 3", "3", "Trois"] }, { lang: "en", speed_synonym: ["Speed 3", "3", "Three"] }] },
+                            { speed_name: "Four", speed_values: [{ lang: "fr", speed_synonym: ["Vitesse 4", "4", "Quatre"] }, { lang: "en", speed_synonym: ["Speed 4", "4", "Four"] }] },
+                            { speed_name: "Five", speed_values: [{ lang: "fr", speed_synonym: ["Vitesse 5", "5", "Cinq"] }, { lang: "en", speed_synonym: ["Speed 5", "5", "Five"] }] }
                         ],
                         ordered: true
                     }
@@ -233,7 +212,7 @@ app.post('/fulfillment', async (req, res) => {
                     thermostatMode: getGoogleMode(clim),
                     thermostatTemperatureSetpoint: getTemp(clim),
                     thermostatTemperatureAmbient: getRoomTemp(clim),
-                    currentFanSpeedSetting: getGoogleFanSpeed(clim, id)
+                    currentFanSpeedSetting: getGoogleFanSpeed(clim)
                 };
             });
             
@@ -245,6 +224,8 @@ app.post('/fulfillment', async (req, res) => {
             const clims = await fetchMelcloudDevices(userCookie);
             const xsrf = extractXsrf(userCookie);
             const safeCookie = userCookie.trim().replace(/\n|\r/g, "");
+            
+            const responseCommands = [];
 
             for (let command of commands) {
                 for (let device of command.devices) {
@@ -254,15 +235,26 @@ app.post('/fulfillment', async (req, res) => {
 
                     let payloadJson = { ...currentDeviceData }; 
                     
+                    // CORRECTION : On prépare l'état mis à jour à renvoyer à Google Home
+                    let updatedStates = {
+                        online: true,
+                        thermostatMode: getGoogleMode(currentDeviceData),
+                        thermostatTemperatureSetpoint: getTemp(currentDeviceData),
+                        currentFanSpeedSetting: getGoogleFanSpeed(currentDeviceData)
+                    };
+                    
                     command.execution.forEach(exec => {
                         if (exec.command === 'action.devices.commands.OnOff') {
                             payloadJson.power = exec.params.on;
+                            updatedStates.thermostatMode = exec.params.on ? "auto" : "off";
                         }
                         if (exec.command === 'action.devices.commands.ThermostatTemperatureSetpoint') {
                             payloadJson.setTemperature = exec.params.thermostatTemperatureSetpoint;
+                            updatedStates.thermostatTemperatureSetpoint = exec.params.thermostatTemperatureSetpoint;
                         }
                         if (exec.command === 'action.devices.commands.ThermostatSetMode') {
                             const mode = exec.params.thermostatMode;
+                            updatedStates.thermostatMode = mode;
                             if (mode === "off") {
                                 payloadJson.power = false;
                             } else {
@@ -275,21 +267,22 @@ app.post('/fulfillment', async (req, res) => {
                             }
                         }
                         if (exec.command === 'action.devices.commands.FanSpeed') {
-                            const googleSpeed = exec.params.fanSpeed; // ex: "1", "2", "auto"
-                            const mitsubishiSpeed = parseGoogleToMelcloudFan(googleSpeed); // ex: "One", "Two", "Auto"
+                            const targetSpeed = exec.params.fanSpeed; // Vaut "One", "Two", "Auto"...
                             
-                            // On enregistre dans le cache pour que le curseur ne saute pas en arrière
-                            fanSpeedCache[climId] = { value: googleSpeed, timestamp: Date.now() };
-
-                            payloadJson.setFanSpeed = mitsubishiSpeed;
+                            // On injecte directement dans la réponse pour figer le curseur
+                            updatedStates.currentFanSpeedSetting = targetSpeed;
+                            if (updatedStates.thermostatMode === "off") updatedStates.thermostatMode = "auto";
+                            
+                            payloadJson.setFanSpeed = targetSpeed;
+                            payloadJson.power = true;
                             
                             ['settings', 'unitSettings'].forEach(containerKey => {
                                 if (Array.isArray(payloadJson[containerKey])) {
                                     payloadJson[containerKey].forEach(item => {
                                         const itemName = String(item.name || item.Name || "").toLowerCase();
                                         if (itemName.includes("fanspeed")) {
-                                            item.value = mitsubishiSpeed;
-                                            item.Value = mitsubishiSpeed;
+                                            item.value = targetSpeed;
+                                            item.Value = targetSpeed;
                                         }
                                     });
                                 }
@@ -309,9 +302,16 @@ app.post('/fulfillment', async (req, res) => {
                         },
                         body: JSON.stringify(payloadJson)
                     });
+
+                    // CORRECTION : L'astuce Home Assistant. Renvoyer l'état mis à jour fige l'interface de Google Home
+                    responseCommands.push({
+                        ids: [climId],
+                        status: "SUCCESS",
+                        states: updatedStates
+                    });
                 }
             }
-            return res.json({ requestId, payload: { commands: commands.map(c => ({ ids: c.devices.map(d => d.id), status: "SUCCESS" })) } });
+            return res.json({ requestId, payload: { commands: responseCommands } });
         }
     } catch (error) {
         console.error("Erreur d'exécution :", error);
