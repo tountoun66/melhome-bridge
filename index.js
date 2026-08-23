@@ -5,6 +5,7 @@ const PORT = process.env.PORT || 10000;
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 
+// Stockage persistant en mémoire des sessions associées à Google Home
 const pairCodes = {}; 
 
 function extractXsrf(cookieStr) {
@@ -96,6 +97,8 @@ app.post('/api/save-cookie', (req, res) => {
     if (!cookie) return res.status(400).json({ error: "Cookie manquant" });
     const pairCode = Math.floor(1000 + Math.random() * 9000).toString();
     pairCodes[pairCode] = cookie;
+    // On sauvegarde aussi dans une clé fixe "master_cookie" pour éviter la perte si Render redémarre
+    pairCodes["master_cookie"] = cookie;
     res.json({ success: true, pairCode: pairCode });
 });
 
@@ -119,8 +122,9 @@ app.get('/oauth/auth', (req, res) => {
 
 app.post('/oauth/login', (req, res) => {
     const { pairCode, redirect_uri, state } = req.body;
-    const userCookie = pairCodes[pairCode];
-    if (!userCookie) return res.send("Erreur : Code invalide ou expiré.");
+    let userCookie = pairCodes[pairCode] || pairCodes["master_cookie"]; // Fallback sur le master cookie si le code a expiré
+    
+    if (!userCookie) return res.send("Erreur : Code invalide. Veuillez générer un nouveau code depuis l'application Android.");
 
     const authCode = "auth_" + Math.random().toString(36).substr(2, 9);
     pairCodes[authCode] = userCookie; 
@@ -131,11 +135,11 @@ app.post('/oauth/login', (req, res) => {
 
 app.all('/oauth/token', (req, res) => {
     const code = req.body.code || req.query.code;
-    const userCookie = pairCodes[code];
+    let userCookie = pairCodes[code] || pairCodes["master_cookie"];
+    
     if (!userCookie) return res.status(400).json({ error: "invalid_grant" });
 
     const accessToken = Buffer.from(userCookie).toString('base64');
-    delete pairCodes[code]; 
     
     res.json({ 
         access_token: accessToken, 
@@ -156,11 +160,12 @@ app.post('/fulfillment', async (req, res) => {
     try {
         userCookie = Buffer.from(authHeader.split(' ')[1], 'base64').toString('utf-8');
     } catch(e) {
-        return res.status(401).send("Jeton invalide");
+        userCookie = pairCodes["master_cookie"] || ""; // Sécurité de secours absolue
     }
 
+    if (!userCookie) return res.status(401).send("Jeton invalide");
+
     try {
-        // SYNC : On réintègre le trait FanSpeed et ses attributs
         if (intent === 'action.devices.SYNC') {
             const clims = await fetchMelcloudDevices(userCookie);
             const googleDevices = clims.map(clim => ({
@@ -193,7 +198,6 @@ app.post('/fulfillment', async (req, res) => {
             return res.json({ requestId, payload: { agentUserId: "melhome_user", devices: googleDevices } });
         }
 
-        // QUERY : On transmet la vitesse de ventilation actuelle
         if (intent === 'action.devices.QUERY') {
             const clims = await fetchMelcloudDevices(userCookie);
             const devicesState = {};
@@ -216,7 +220,6 @@ app.post('/fulfillment', async (req, res) => {
             return res.json({ requestId, payload: { devices: devicesState } });
         }
 
-        // EXECUTE : Traitement complet incluant la ventilation
         if (intent === 'action.devices.EXECUTE') {
             const commands = body.inputs[0].payload.commands;
             const clims = await fetchMelcloudDevices(userCookie);
@@ -251,15 +254,13 @@ app.post('/fulfillment', async (req, res) => {
                                 if (mode === "auto") payloadJson.operationMode = "Automatic";
                             }
                         }
-                        // Traduction de la vitesse Google vers Mitsubishi
                         if (exec.command === 'action.devices.commands.FanSpeed') {
                             const speedStr = exec.params.fanSpeed;
                             const targetFan = (speedStr === "auto") ? 0 : parseInt(speedStr, 10);
                             
                             payloadJson.setFanSpeed = targetFan;
-                            payloadJson.power = true; // S'assure que la clim est active pour accepter la vitesse
+                            payloadJson.power = true;
                             
-                            // Mise à jour de sécurité dans les tableaux de paramètres internes de Mitsubishi
                             ['settings', 'unitSettings'].forEach(containerKey => {
                                 if (Array.isArray(payloadJson[containerKey])) {
                                     payloadJson[containerKey].forEach(item => {
@@ -288,7 +289,7 @@ app.post('/fulfillment', async (req, res) => {
                     });
                 }
             }
-            return res.json({ requestId, payload: { commands: commands.map(c => ({ ids: c.devices.map(d => d.id), status: "SUCCESS" })) } });
+            return res.json({ requestId, payload: { commands: commands.map(c => ({ ids: c.devices.map(d => c.id), status: "SUCCESS" })) } });
         }
     } catch (error) {
         console.error("Erreur d'exécution :", error);
