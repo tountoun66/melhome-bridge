@@ -52,15 +52,30 @@ function getTemp(clim) {
     return (!isNaN(num) && num > 0 && num < 60) ? num : 20.0;
 }
 
-// Lecture de la vitesse renvoyée par Mitsubishi
-function getFanSpeedName(clim) {
+// Convertit la vitesse Mitsubishi en format universel Google
+function getGoogleFanSpeed(clim) {
     const val = getSetting(clim, ["setFanSpeed", "SetFanSpeed", "fanSpeed", "FanSpeed"]);
-    if (val === undefined || val === null) return "Auto";
-    // Si c'est déjà du texte (ex: "One", "Two", "Auto")
-    if (typeof val === 'string') return val;
-    // Si c'est un nombre (0, 1, 2...)
-    const mapNumToText = ["Auto", "One", "Two", "Three", "Four", "Five"];
-    return mapNumToText[parseInt(val, 10)] || "Auto";
+    if (val === undefined || val === null) return "auto";
+    const str = String(val).toLowerCase();
+    
+    if (str.includes("one") || str === "1") return "low";
+    if (str.includes("two") || str === "2") return "medium_low";
+    if (str.includes("three") || str === "3") return "medium";
+    if (str.includes("four") || str === "4") return "medium_high";
+    if (str.includes("five") || str === "5") return "high";
+    return "auto";
+}
+
+// Convertit la vitesse Google vers le texte attendu par Mitsubishi
+function parseGoogleFanSpeedToMitsubishi(googleSpeed) {
+    switch (googleSpeed) {
+        case "low": return "One";
+        case "medium_low": return "Two";
+        case "medium": return "Three";
+        case "medium_high": return "Four";
+        case "high": return "Five";
+        default: return "Auto";
+    }
 }
 
 function getGoogleMode(clim) {
@@ -164,7 +179,7 @@ app.post('/fulfillment', async (req, res) => {
     if (!userCookie) return res.status(401).send("Jeton invalide");
 
     try {
-        // SYNC : On déclare les vitesses textuelles exactes attendues par l'API
+        // SYNC : Utilisation de la nomenclature officielle Google Home pour les vitesses
         if (intent === 'action.devices.SYNC') {
             const clims = await fetchMelcloudDevices(userCookie);
             const googleDevices = clims.map(clim => ({
@@ -183,12 +198,12 @@ app.post('/fulfillment', async (req, res) => {
                     commandOnlyFanSpeed: false,
                     availableFanSpeeds: {
                         speeds: [
-                            { speed_name: "Auto", speed_values: [{ lang_format: "en", speed_synonym: ["auto", "automatic"] }, { lang_format: "fr", speed_synonym: ["auto", "automatique"] }] },
-                            { speed_name: "One", speed_values: [{ lang_format: "en", speed_synonym: ["speed 1", "one", "1"] }, { lang_format: "fr", speed_synonym: ["vitesse 1", "un", "1"] }] },
-                            { speed_name: "Two", speed_values: [{ lang_format: "en", speed_synonym: ["speed 2", "two", "2"] }, { lang_format: "fr", speed_synonym: ["vitesse 2", "deux", "2"] }] },
-                            { speed_name: "Three", speed_values: [{ lang_format: "en", speed_synonym: ["speed 3", "three", "3"] }, { lang_format: "fr", speed_synonym: ["vitesse 3", "trois", "3"] }] },
-                            { speed_name: "Four", speed_values: [{ lang_format: "en", speed_synonym: ["speed 4", "four", "4"] }, { lang_format: "fr", speed_synonym: ["vitesse 4", "quatre", "4"] }] },
-                            { speed_name: "Five", speed_values: [{ lang_format: "en", speed_synonym: ["speed 5", "five", "5"] }, { lang_format: "fr", speed_synonym: ["vitesse 5", "cinq", "5"] }] }
+                            { speed_name: "auto", speed_values: [{ lang_format: "en", speed_synonym: ["auto", "automatic"] }, { lang_format: "fr", speed_synonym: ["auto", "automatique"] }] },
+                            { speed_name: "low", speed_values: [{ lang_format: "en", speed_synonym: ["speed 1", "low", "1"] }, { lang_format: "fr", speed_synonym: ["vitesse 1", "lent", "1"] }] },
+                            { speed_name: "medium_low", speed_values: [{ lang_format: "en", speed_synonym: ["speed 2", "medium low", "2"] }, { lang_format: "fr", speed_synonym: ["vitesse 2", "moyen bas", "2"] }] },
+                            { speed_name: "medium", speed_values: [{ lang_format: "en", speed_synonym: ["speed 3", "medium", "3"] }, { lang_format: "fr", speed_synonym: ["vitesse 3", "moyen", "3"] }] },
+                            { speed_name: "medium_high", speed_values: [{ lang_format: "en", speed_synonym: ["speed 4", "medium high", "4"] }, { lang_format: "fr", speed_synonym: ["vitesse 4", "moyen haut", "4"] }] },
+                            { speed_name: "high", speed_values: [{ lang_format: "en", speed_synonym: ["speed 5", "high", "5"] }, { lang_format: "fr", speed_synonym: ["vitesse 5", "rapide", "5"] }] }
                         ],
                         ordered: true
                     }
@@ -197,14 +212,14 @@ app.post('/fulfillment', async (req, res) => {
             return res.json({ requestId, payload: { agentUserId: "melhome_user", devices: googleDevices } });
         }
 
-        // QUERY : On renvoie le nom exact (One, Two...) à Google
+        // QUERY : Renvoie le format standard Google
         if (intent === 'action.devices.QUERY') {
             const clims = await fetchMelcloudDevices(userCookie);
             const devicesState = {};
 
             clims.forEach(clim => {
                 const id = (clim.id || clim.ID).toString();
-                const fanName = getFanSpeedName(clim); // Renvoie "Auto", "One", "Two"...
+                const fanName = getGoogleFanSpeed(clim); // Renvoie "auto", "low", "medium"...
 
                 devicesState[id] = {
                     online: true,
@@ -219,7 +234,7 @@ app.post('/fulfillment', async (req, res) => {
             return res.json({ requestId, payload: { devices: devicesState } });
         }
 
-        // EXECUTE : On transmet directement le texte ("One", "Two"...) à Mitsubishi
+        // EXECUTE : Convertit le format Google en texte Mitsubishi ("One", "Two"...)
         if (intent === 'action.devices.EXECUTE') {
             const commands = body.inputs[0].payload.commands;
             const clims = await fetchMelcloudDevices(userCookie);
@@ -254,11 +269,12 @@ app.post('/fulfillment', async (req, res) => {
                                 if (mode === "auto") payloadJson.operationMode = "Automatic";
                             }
                         }
-                        // Ici, exec.params.fanSpeed renvoie directement "One", "Two", "Auto"...
+                        // Traduction de la vitesse Google vers le format textuel de Mitsubishi ("One", "Two"...)
                         if (exec.command === 'action.devices.commands.FanSpeed') {
-                            const targetFanText = exec.params.fanSpeed; // ex: "One", "Two", "Auto"
+                            const googleSpeed = exec.params.fanSpeed; // ex: "low", "medium", "high"
+                            const mitsubishiSpeedText = parseGoogleFanSpeedToMitsubishi(googleSpeed); // "One", "Two"...
                             
-                            payloadJson.setFanSpeed = targetFanText;
+                            payloadJson.setFanSpeed = mitsubishiSpeedText;
                             payloadJson.power = true;
                             
                             // Mise à jour de sécurité dans les tableaux de configuration internes
@@ -267,8 +283,8 @@ app.post('/fulfillment', async (req, res) => {
                                     payloadJson[containerKey].forEach(item => {
                                         const itemName = String(item.name || item.Name || "").toLowerCase();
                                         if (itemName.includes("fanspeed")) {
-                                            item.value = targetFanText;
-                                            item.Value = targetFanText;
+                                            item.value = mitsubishiSpeedText;
+                                            item.Value = mitsubishiSpeedText;
                                         }
                                     });
                                 }
