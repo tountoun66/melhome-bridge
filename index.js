@@ -6,6 +6,8 @@ app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 
 const pairCodes = {}; 
+// Le fameux cache pour valider immédiatement le mouvement dans Google Home
+const fanSpeedCache = {}; 
 
 function extractXsrf(cookieStr) {
     const match = cookieStr.match(/XSRF-TOKEN=([^;]+)/i);
@@ -52,6 +54,41 @@ function getTemp(clim) {
     return (!isNaN(num) && num > 0 && num < 60) ? num : 20.0;
 }
 
+// -------------------------------------------------------------
+// GESTION INTELLIGENTE DE LA VENTILATION (AVEC CACHE)
+// -------------------------------------------------------------
+function getGoogleFanSpeed(clim, climId) {
+    // 1. Vérifie si on vient juste de changer la vitesse (cache valable 15 secondes)
+    if (fanSpeedCache[climId] && (Date.now() - fanSpeedCache[climId].timestamp < 15000)) {
+        return fanSpeedCache[climId].value;
+    }
+
+    // 2. Sinon, on lit la vraie valeur sur la clim
+    const val = getSetting(clim, ["setFanSpeed", "SetFanSpeed", "fanSpeed", "FanSpeed"]);
+    if (val === undefined || val === null) return "auto";
+    const str = String(val).toLowerCase();
+    
+    // On convertit le retour de Mitsubishi vers notre standard (1, 2, 3...)
+    if (str === "one" || str === "1") return "1";
+    if (str === "two" || str === "2") return "2";
+    if (str === "three" || str === "3") return "3";
+    if (str === "four" || str === "4") return "4";
+    if (str === "five" || str === "5") return "5";
+    return "auto";
+}
+
+function parseGoogleToMelcloudFan(googleSpeed) {
+    switch(String(googleSpeed)) {
+        case "1": return "One";
+        case "2": return "Two";
+        case "3": return "Three";
+        case "4": return "Four";
+        case "5": return "Five";
+        default: return "Auto";
+    }
+}
+// -------------------------------------------------------------
+
 function getGoogleMode(clim) {
     if (!isPoweredOn(clim)) return "off"; 
     
@@ -90,7 +127,7 @@ app.post('/api/save-cookie', (req, res) => {
     if (!cookie) return res.status(400).json({ error: "Cookie manquant" });
     const pairCode = Math.floor(1000 + Math.random() * 9000).toString();
     pairCodes[pairCode] = cookie;
-    pairCodes["master_cookie"] = cookie; // Sécurité persistante anti-perte de lien
+    pairCodes["master_cookie"] = cookie;
     res.json({ success: true, pairCode: pairCode });
 });
 
@@ -159,13 +196,26 @@ app.post('/fulfillment', async (req, res) => {
                 id: (clim.id || clim.ID).toString(),
                 type: "action.devices.types.THERMOSTAT",
                 traits: [
-                    "action.devices.traits.TemperatureSetting"
+                    "action.devices.traits.TemperatureSetting",
+                    "action.devices.traits.FanSpeed"
                 ],
                 name: { name: clim.givenDisplayName || clim.GivenDisplayName || "Climatiseur" },
                 willReportState: false,
                 attributes: { 
                     availableThermostatModes: "off,on,heat,cool,dry,fan-only,auto", 
-                    thermostatTemperatureUnit: "C" 
+                    thermostatTemperatureUnit: "C",
+                    supportsFanSpeedPercent: false,
+                    availableFanSpeeds: {
+                        speeds: [
+                            { speed_name: "auto", speed_values: [{ lang_format: "fr", speed_synonym: ["auto", "automatique"] }, { lang_format: "en", speed_synonym: ["auto", "automatic"] }] },
+                            { speed_name: "1", speed_values: [{ lang_format: "fr", speed_synonym: ["1", "vitesse 1", "un"] }, { lang_format: "en", speed_synonym: ["1", "speed 1", "one"] }] },
+                            { speed_name: "2", speed_values: [{ lang_format: "fr", speed_synonym: ["2", "vitesse 2", "deux"] }, { lang_format: "en", speed_synonym: ["2", "speed 2", "two"] }] },
+                            { speed_name: "3", speed_values: [{ lang_format: "fr", speed_synonym: ["3", "vitesse 3", "trois"] }, { lang_format: "en", speed_synonym: ["3", "speed 3", "three"] }] },
+                            { speed_name: "4", speed_values: [{ lang_format: "fr", speed_synonym: ["4", "vitesse 4", "quatre"] }, { lang_format: "en", speed_synonym: ["4", "speed 4", "four"] }] },
+                            { speed_name: "5", speed_values: [{ lang_format: "fr", speed_synonym: ["5", "vitesse 5", "cinq"] }, { lang_format: "en", speed_synonym: ["5", "speed 5", "five"] }] }
+                        ],
+                        ordered: true
+                    }
                 }
             }));
             return res.json({ requestId, payload: { agentUserId: "melhome_user", devices: googleDevices } });
@@ -182,7 +232,8 @@ app.post('/fulfillment', async (req, res) => {
                     status: "SUCCESS",
                     thermostatMode: getGoogleMode(clim),
                     thermostatTemperatureSetpoint: getTemp(clim),
-                    thermostatTemperatureAmbient: getRoomTemp(clim)
+                    thermostatTemperatureAmbient: getRoomTemp(clim),
+                    currentFanSpeedSetting: getGoogleFanSpeed(clim, id)
                 };
             });
             
@@ -223,11 +274,32 @@ app.post('/fulfillment', async (req, res) => {
                                 if (mode === "auto") payloadJson.operationMode = "Automatic";
                             }
                         }
+                        if (exec.command === 'action.devices.commands.FanSpeed') {
+                            const googleSpeed = exec.params.fanSpeed; // ex: "1", "2", "auto"
+                            const mitsubishiSpeed = parseGoogleToMelcloudFan(googleSpeed); // ex: "One", "Two", "Auto"
+                            
+                            // On enregistre dans le cache pour que le curseur ne saute pas en arrière
+                            fanSpeedCache[climId] = { value: googleSpeed, timestamp: Date.now() };
+
+                            payloadJson.setFanSpeed = mitsubishiSpeed;
+                            
+                            ['settings', 'unitSettings'].forEach(containerKey => {
+                                if (Array.isArray(payloadJson[containerKey])) {
+                                    payloadJson[containerKey].forEach(item => {
+                                        const itemName = String(item.name || item.Name || "").toLowerCase();
+                                        if (itemName.includes("fanspeed")) {
+                                            item.value = mitsubishiSpeed;
+                                            item.Value = mitsubishiSpeed;
+                                        }
+                                    });
+                                }
+                            });
+                        }
                     });
 
                     await fetch(`https://melcloudhome.com/api/ataunit/${climId}`, {
                         method: 'PUT',
-                    headers: {
+                        headers: {
                             "Content-Type": "application/json; charset=utf-8",
                             "Cookie": safeCookie,
                             "X-XSRF-TOKEN": xsrf,
