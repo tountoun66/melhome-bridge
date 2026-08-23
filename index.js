@@ -5,13 +5,9 @@ const PORT = process.env.PORT || 3000;
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 
-// Journalisation ultra-détaillée de TOUTES les requêtes entrantes
+// Journalisation de chaque requête
 app.use((req, res, next) => {
-    console.log(`\n--- NOUVELLE REQUÊTE ---`);
-    console.log(`[${req.method}] ${req.url}`);
-    console.log(`Headers :`, req.headers);
-    console.log(`Body :`, req.body);
-    console.log(`Query :`, req.query);
+    console.log(`[${req.method}] ${req.url}`, { body: req.body, query: req.query });
     next();
 });
 
@@ -27,7 +23,7 @@ app.get('/', (req, res) => {
     `);
 });
 
-// 1. Page de connexion OAuth
+// 1. Page de connexion OAuth (Affichée par Google)
 app.get('/oauth/auth', (req, res) => {
     const { client_id, redirect_uri, state } = req.query;
 
@@ -67,10 +63,9 @@ app.post('/oauth/login', (req, res) => {
     res.redirect(targetUrl);
 });
 
-// 3. Token URL (Accepte TOUT et répond au format standard OAuth2)
+// 3. Token URL (Échange du code)
 app.all('/oauth/token', (req, res) => {
-    console.log(">>> /oauth/token A BIEN ÉTÉ APPELÉ PAR GOOGLE ! <<<");
-
+    console.log("=== REQUÊTE TOKEN REÇUE ===");
     res.setHeader('Cache-Control', 'no-store');
     res.setHeader('Pragma', 'no-cache');
 
@@ -82,12 +77,86 @@ app.all('/oauth/token', (req, res) => {
     });
 });
 
-// 4. Fulfillment
+// 4. Fulfillment (Le cœur de Google Smart Home)
 app.post('/fulfillment', (req, res) => {
-    res.json({
-        requestId: req.body?.requestId || "req_123",
-        payload: { devices: [] }
-    });
+    const body = req.body;
+    console.log("=== FULFILLMENT REÇU ===", JSON.stringify(body, null, 2));
+
+    const requestId = body?.requestId || "req_123";
+    const inputs = body?.inputs || [];
+    const intent = inputs[0]?.intent;
+
+    // A. Étape de synchronisation (Google demande la liste des appareils)
+    if (intent === 'action.devices.SYNC') {
+        return res.json({
+            requestId: requestId,
+            payload: {
+                agentUserId: "user_melhome_01",
+                devices: [
+                    {
+                        id: "clim_salon",
+                        type: "action.devices.type.THERMOSTAT",
+                        traits: [
+                            "action.devices.traits.TemperatureSetting",
+                            "action.devices.traits.OnOff"
+                        ],
+                        name: {
+                            defaultNames: ["Climatiseur Melhome"],
+                            name: "Clim Salon",
+                            nicknames: ["Clim"]
+                        },
+                        willReportState: false,
+                        attributes: {
+                            availableThermostatModes: "off,heat,cool,auto",
+                            temperatureUnit: "C"
+                        }
+                    }
+                ]
+            }
+        });
+    }
+
+    // B. Étape de requête d'état (QUERY)
+    if (intent === 'action.devices.QUERY') {
+        return res.json({
+            requestId: requestId,
+            payload: {
+                devices: {
+                    "clim_salon": {
+                        online: true,
+                        status: "SUCCESS",
+                        thermostatMode: "cool",
+                        thermostatTemperatureSetpoint: 21,
+                        thermostatAmbientTemperature: 22,
+                        on: true
+                    }
+                }
+            }
+        });
+    }
+
+    // C. Étape de commande (EXECUTE)
+    if (intent === 'action.devices.EXECUTE') {
+        return res.json({
+            requestId: requestId,
+            payload: {
+                commands: [
+                    {
+                        ids: ["clim_salon"],
+                        status: "SUCCESS",
+                        states: {
+                            online: true,
+                            on: true,
+                            thermostatMode: "cool"
+                        }
+                    }
+                ]
+            }
+        });
+    }
+
+    // Réponse par défaut
+    res.json({ requestId, payload: {} });
 });
 
 app.listen(PORT, () => {
