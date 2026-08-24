@@ -178,11 +178,19 @@ app.post('/fulfillment', async (req, res) => {
 
     if (!authHeader) return res.status(401).send("Non autorisé");
 
-    let userCookie = "";
-    try {
-        userCookie = Buffer.from(authHeader.split(' ')[1], 'base64').toString('utf-8');
-    } catch(e) {
-        userCookie = pairCodes["master_cookie"] || "";
+    // --- LA NOUVELLE LOGIQUE ANTI-RÉASSOCIATION GOOGLE HOME ---
+    // 1. Priorité absolue au master_cookie (le dernier envoyé par l'appli Android)
+    let userCookie = pairCodes["master_cookie"]; 
+
+    // 2. Secours : si le serveur a redémarré, on va chercher le vieux jeton de Google
+    if (!userCookie) {
+        try {
+            userCookie = Buffer.from(authHeader.split(' ')[1], 'base64').toString('utf-8');
+            // Et on le mémorise pour relancer la machine
+            pairCodes["master_cookie"] = userCookie;
+        } catch(e) {
+            userCookie = "";
+        }
     }
 
     if (!userCookie) return res.status(401).send("Jeton invalide");
