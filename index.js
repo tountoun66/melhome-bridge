@@ -7,6 +7,11 @@ app.use(express.json());
 
 const pairCodes = {}; 
 
+// --- SYSTÈME DE CACHE POUR ÉVITER LES TIMEOUTS GOOGLE HOME ---
+let cachedDevices = [];
+let lastCacheTime = 0;
+const CACHE_TTL = 30000; // 30 secondes de cache
+
 function extractXsrf(cookieStr) {
     const match = cookieStr.match(/XSRF-TOKEN=([^;]+)/i);
     if (match) {
@@ -78,12 +83,18 @@ function getGoogleFanSpeed(clim) {
     return "Auto";
 }
 
-// --- SYSTEME DE RELANCE AUTOMATIQUE (5 TENTATIVES) ---
+// --- SYSTEME DE RELANCE AUTOMATIQUE AVEC CACHE DE SECOURS ---
 async function fetchMelcloudDevices(cookie) {
+    const now = Date.now();
+    // Si le cache a moins de 30 secondes, on le retourne direct pour être ultra rapide
+    if (cachedDevices.length > 0 && (now - lastCacheTime < CACHE_TTL)) {
+        return cachedDevices;
+    }
+
     const xsrf = extractXsrf(cookie);
     const safeCookie = cookie.trim().replace(/\n|\r/g, "");
     
-    const maxRetries = 5; // 6 tentatives en tout (1 initiale + 5 relances)
+    const maxRetries = 5;
 
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
         try {
@@ -102,19 +113,30 @@ async function fetchMelcloudDevices(cookie) {
 
             if (!response.ok) {
                 if (response.status === 500 && attempt < maxRetries) {
-                    console.warn(`[MELCloud] Liste appareils: Erreur 500 reçue. Retentative (${attempt + 1}/${maxRetries})...`);
-                    await new Promise(res => setTimeout(res, 1500)); // Pause de 1.5s
+                    console.warn(`[MELCloud] Liste appareils: Erreur 500 reçue. Retentative (${attempt + 1}/5)...`);
+                    await new Promise(res => setTimeout(res, 1500));
                     continue; 
                 }
                 throw new Error("Erreur de connexion API HTTP " + response.status);
             }
             
             const data = await response.json();
-            return (data.buildings && data.buildings.length > 0) ? (data.buildings[0].airToAirUnits || []) : [];
+            const units = (data.buildings && data.buildings.length > 0) ? (data.buildings[0].airToAirUnits || []) : [];
+            
+            if (units.length > 0) {
+                cachedDevices = units;
+                lastCacheTime = Date.now();
+            }
+            return units;
             
         } catch (error) {
             if (attempt === maxRetries) {
                 console.error("[MELCloud] Liste appareils: Échec définitif :", error.message);
+                // PLAN B : Si l'API plante complètement, on renvoie le vieux cache pour ne pas bloquer Google Home
+                if (cachedDevices.length > 0) {
+                    console.warn("[MELCloud] Utilisation du cache de secours suite à l'échec.");
+                    return cachedDevices;
+                }
                 throw error; 
             }
             await new Promise(res => setTimeout(res, 1500));
@@ -327,6 +349,8 @@ app.post('/fulfillment', async (req, res) => {
                             
                             if (resFetch.ok) {
                                 commandSuccess = true;
+                                // On vide le cache pour forcer un rafraîchissement au prochain query
+                                lastCacheTime = 0; 
                                 break;
                             }
                             
