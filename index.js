@@ -1,11 +1,45 @@
 const express = require('express');
+const fs = require('fs');
+const path = require('path');
+
 const app = express();
 const PORT = process.env.PORT || 10000;
 
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 
-const pairCodes = {}; 
+// Fichier de persistance pour survivre aux redémarrages de Render
+const TOKEN_FILE = path.join('/tmp', 'melhome_token.json');
+
+let pairCodes = {}; 
+
+// Charger le cookie sauvegardé au démarrage s'il existe
+function loadPersistedCookie() {
+    try {
+        if (fs.existsSync(TOKEN_FILE)) {
+            const data = fs.readFileSync(TOKEN_FILE, 'utf8');
+            const json = JSON.parse(data);
+            if (json.cookie) {
+                pairCodes["master_cookie"] = json.cookie;
+                console.log("[STORAGE] Cookie persistant restauré avec succès depuis le disque.");
+            }
+        }
+    } catch (e) {
+        console.error("[STORAGE] Erreur lors de la lecture du cookie persistant:", e.message);
+    }
+}
+
+// Sauvegarder le cookie sur le disque
+function savePersistedCookie(cookie) {
+    try {
+        fs.writeFileSync(TOKEN_FILE, JSON.stringify({ cookie }), 'utf8');
+        console.log("[STORAGE] Cookie sauvegardé sur le disque.");
+    } catch (e) {
+        console.error("[STORAGE] Erreur lors de l'écriture du cookie:", e.message);
+    }
+}
+
+loadPersistedCookie();
 
 // --- SYSTÈME DE CACHE POUR ÉVITER LES TIMEOUTS GOOGLE HOME ---
 let cachedDevices = [];
@@ -84,7 +118,6 @@ function getGoogleFanSpeed(clim) {
     return "Auto";
 }
 
-// --- SYSTEME DE RELANCE AUTOMATIQUE AVEC CACHE DE SECOURS RENFORCÉ ---
 async function fetchMelcloudDevices(cookie) {
     const now = Date.now();
     if (cachedDevices.length > 0 && (now - lastCacheTime < CACHE_TTL)) {
@@ -92,16 +125,12 @@ async function fetchMelcloudDevices(cookie) {
     }
 
     if (!cookie) {
-        if (cachedDevices.length > 0) {
-            console.warn("[MELCloud] Aucun cookie valide, utilisation directe du cache de secours.");
-            return cachedDevices;
-        }
+        if (cachedDevices.length > 0) return cachedDevices;
         throw new Error("Cookie manquant et aucun cache disponible.");
     }
 
     const xsrf = extractXsrf(cookie);
     const safeCookie = cookie.trim().replace(/\n|\r/g, "");
-    
     const maxRetries = 3;
 
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
@@ -121,7 +150,6 @@ async function fetchMelcloudDevices(cookie) {
 
             if (!response.ok) {
                 if (response.status === 500 && attempt < maxRetries) {
-                    console.warn(`[MELCloud] Liste appareils: Erreur 500 reçue. Retentative (${attempt + 1}/${maxRetries})...`);
                     await new Promise(res => setTimeout(res, 1000));
                     continue; 
                 }
@@ -139,12 +167,7 @@ async function fetchMelcloudDevices(cookie) {
             
         } catch (error) {
             if (attempt === maxRetries) {
-                console.error("[MELCloud] Liste appareils: Échec définitif :", error.message);
-                // PLAN B MAGIQUE : Si le serveur a redémarré ou que Mitsubishi plante, on renvoie le cache au lieu de crasher !
-                if (cachedDevices.length > 0) {
-                    console.warn("[MELCloud] 🛡️ Utilisation du cache de secours suite au redémarrage/échec.");
-                    return cachedDevices;
-                }
+                if (cachedDevices.length > 0) return cachedDevices;
                 throw error; 
             }
             await new Promise(res => setTimeout(res, 1000));
@@ -158,6 +181,10 @@ app.post('/api/save-cookie', (req, res) => {
     const pairCode = Math.floor(1000 + Math.random() * 9000).toString();
     pairCodes[pairCode] = cookie;
     pairCodes["master_cookie"] = cookie;
+    
+    // Sauvegarde immédiate sur le disque de Render
+    savePersistedCookie(cookie);
+
     res.json({ success: true, pairCode: pairCode });
 });
 
@@ -364,7 +391,7 @@ app.post('/fulfillment', async (req, res) => {
                             break;
                         } catch (e) {
                             if (attempt < 3) {
-                                await new Recovery(r => setTimeout(r, 1000)); // fixed typo
+                                await new Promise(r => setTimeout(r, 1000));
                                 continue;
                             }
                         }
@@ -389,8 +416,7 @@ app.post('/fulfillment', async (req, res) => {
         }
     } catch (error) {
         console.error("Erreur d'exécution globale :", error);
-        // Même en cas d'erreur critique, on évite de bloquer Google si on a un cache
-        if (cachedDevices.length > 0 && intent === 'action.devices.QUERY') {
+        if (cachedDevices.length > 0) {
             const devicesState = {};
             cachedDevices.forEach(clim => {
                 const id = (clim.id || clim.ID).toString();
