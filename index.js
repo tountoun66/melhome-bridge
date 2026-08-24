@@ -78,7 +78,7 @@ function getGoogleFanSpeed(clim) {
     return "Auto";
 }
 
-// --- SYSTEME DE RELANCE AUTOMATIQUE (RETRY) ---
+// --- SYSTEME DE RELANCE AUTOMATIQUE (RETRY) AMÉLIORÉ ---
 async function fetchMelcloudDevices(cookie) {
     const xsrf = extractXsrf(cookie);
     const safeCookie = cookie.trim().replace(/\n|\r/g, "");
@@ -94,14 +94,16 @@ async function fetchMelcloudDevices(cookie) {
                     "X-XSRF-TOKEN": xsrf,
                     "X-Csrf": "1",
                     "X-Requested-With": "XMLHttpRequest",
-                    "Accept": "application/json, text/plain, */*"
+                    "Accept": "application/json, text/plain, */*",
+                    "Referer": "https://melcloudhome.com/",
+                    "Origin": "https://melcloudhome.com"
                 }
             });
 
             if (!response.ok) {
                 if (response.status === 500 && attempt < maxRetries) {
                     console.warn(`[MELCloud] Liste appareils: Erreur 500 reçue. Retentative (${attempt + 1}/${maxRetries})...`);
-                    await new Promise(res => setTimeout(res, 800)); // Pause de 0.8s
+                    await new Promise(res => setTimeout(res, 1000)); // Pause de 1s
                     continue; 
                 }
                 throw new Error("Erreur de connexion API HTTP " + response.status);
@@ -115,7 +117,7 @@ async function fetchMelcloudDevices(cookie) {
                 console.error("[MELCloud] Liste appareils: Échec définitif :", error.message);
                 throw error; 
             }
-            await new Promise(res => setTimeout(res, 800));
+            await new Promise(res => setTimeout(res, 1000));
         }
     }
 }
@@ -178,15 +180,11 @@ app.post('/fulfillment', async (req, res) => {
 
     if (!authHeader) return res.status(401).send("Non autorisé");
 
-    // --- LA NOUVELLE LOGIQUE ANTI-RÉASSOCIATION GOOGLE HOME ---
-    // 1. Priorité absolue au master_cookie (le dernier envoyé par l'appli Android)
     let userCookie = pairCodes["master_cookie"]; 
 
-    // 2. Secours : si le serveur a redémarré, on va chercher le vieux jeton de Google
     if (!userCookie) {
         try {
             userCookie = Buffer.from(authHeader.split(' ')[1], 'base64').toString('utf-8');
-            // Et on le mémorise pour relancer la machine
             pairCodes["master_cookie"] = userCookie;
         } catch(e) {
             userCookie = "";
@@ -309,11 +307,10 @@ app.post('/fulfillment', async (req, res) => {
                         }
                     });
 
-                    // --- RETRY SUR L'EXECUTION DE COMMANDE ---
                     let commandSuccess = false;
                     for (let attempt = 0; attempt <= 2; attempt++) {
                         try {
-                            const res = await fetch(`https://melcloudhome.com/api/ataunit/${climId}`, {
+                            const resFetch = await fetch(`https://melcloudhome.com/api/ataunit/${climId}`, {
                                 method: 'PUT',
                                 headers: {
                                     "Content-Type": "application/json; charset=utf-8",
@@ -321,26 +318,28 @@ app.post('/fulfillment', async (req, res) => {
                                     "X-XSRF-TOKEN": xsrf,
                                     "X-Csrf": "1",
                                     "X-Requested-With": "XMLHttpRequest",
-                                    "Accept": "application/json, text/plain, */*"
+                                    "Accept": "application/json, text/plain, */*",
+                                    "Referer": "https://melcloudhome.com/",
+                                    "Origin": "https://melcloudhome.com"
                                 },
                                 body: JSON.stringify(payloadJson)
                             });
                             
-                            if (res.ok) {
+                            if (resFetch.ok) {
                                 commandSuccess = true;
                                 break;
                             }
                             
-                            if (res.status === 500 && attempt < 2) {
+                            if (resFetch.status === 500 && attempt < 2) {
                                 console.warn(`[MELCloud] Commande: Erreur 500. Retentative (${attempt + 1}/2)...`);
-                                await new Promise(r => setTimeout(r, 800));
+                                await new Promise(r => setTimeout(r, 1000));
                                 continue;
                             }
                             
                             break;
                         } catch (e) {
                             if (attempt < 2) {
-                                await new Promise(r => setTimeout(r, 800));
+                                await new Promise(r => setTimeout(r, 1000));
                                 continue;
                             }
                         }
