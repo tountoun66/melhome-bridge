@@ -78,12 +78,12 @@ function getGoogleFanSpeed(clim) {
     return "Auto";
 }
 
-// --- SYSTEME DE RELANCE AUTOMATIQUE (RETRY) AMÉLIORÉ ---
+// --- SYSTEME DE RELANCE AUTOMATIQUE (5 TENTATIVES) ---
 async function fetchMelcloudDevices(cookie) {
     const xsrf = extractXsrf(cookie);
     const safeCookie = cookie.trim().replace(/\n|\r/g, "");
     
-    const maxRetries = 2; // 3 tentatives en tout
+    const maxRetries = 5; // 6 tentatives en tout (1 initiale + 5 relances)
 
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
         try {
@@ -103,7 +103,7 @@ async function fetchMelcloudDevices(cookie) {
             if (!response.ok) {
                 if (response.status === 500 && attempt < maxRetries) {
                     console.warn(`[MELCloud] Liste appareils: Erreur 500 reçue. Retentative (${attempt + 1}/${maxRetries})...`);
-                    await new Promise(res => setTimeout(res, 1000)); // Pause de 1s
+                    await new Promise(res => setTimeout(res, 1500)); // Pause de 1.5s
                     continue; 
                 }
                 throw new Error("Erreur de connexion API HTTP " + response.status);
@@ -117,7 +117,7 @@ async function fetchMelcloudDevices(cookie) {
                 console.error("[MELCloud] Liste appareils: Échec définitif :", error.message);
                 throw error; 
             }
-            await new Promise(res => setTimeout(res, 1000));
+            await new Promise(res => setTimeout(res, 1500));
         }
     }
 }
@@ -308,7 +308,7 @@ app.post('/fulfillment', async (req, res) => {
                     });
 
                     let commandSuccess = false;
-                    for (let attempt = 0; attempt <= 2; attempt++) {
+                    for (let attempt = 0; attempt <= 5; attempt++) {
                         try {
                             const resFetch = await fetch(`https://melcloudhome.com/api/ataunit/${climId}`, {
                                 method: 'PUT',
@@ -330,16 +330,16 @@ app.post('/fulfillment', async (req, res) => {
                                 break;
                             }
                             
-                            if (resFetch.status === 500 && attempt < 2) {
-                                console.warn(`[MELCloud] Commande: Erreur 500. Retentative (${attempt + 1}/2)...`);
-                                await new Promise(r => setTimeout(r, 1000));
+                            if (resFetch.status === 500 && attempt < 5) {
+                                console.warn(`[MELCloud] Commande: Erreur 500. Retentative (${attempt + 1}/5)...`);
+                                await new Promise(r => setTimeout(r, 1500));
                                 continue;
                             }
                             
                             break;
                         } catch (e) {
-                            if (attempt < 2) {
-                                await new Promise(r => setTimeout(r, 1000));
+                            if (attempt < 5) {
+                                await new Promise(r => setTimeout(r, 1500));
                                 continue;
                             }
                         }
