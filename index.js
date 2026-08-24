@@ -134,28 +134,38 @@ async function fetchMelcloudDevices(cookie) {
     }
 }
 
-// Route de synchronisation du cookie par le Worker
+// ------------------------------------------------------------------
+// ROUTE OÙ RENDER PREND L'INITIATIVE DE DEMANDER LE COOKIE
+// ------------------------------------------------------------------
+app.get('/api/check-status', (req, res) => {
+    const hasCookie = !!pairCodes["master_cookie"];
+    if (!hasCookie) {
+        console.warn("[ACTION REQUISE] Render a redémarré, envoi de l'ordre PUSH_COOKIE_REQUIRED au téléphone.");
+        return res.json({ 
+            status: "ERROR", 
+            action: "PUSH_COOKIE_REQUIRED",
+            message: "Serveur sans cookie. Envoi immédiat exigé." 
+        });
+    }
+    res.json({ status: "OK", action: "NONE" });
+});
+
+// ROUTE POUR RECEVOIR LE COOKIE
 app.post('/api/save-cookie', (req, res) => {
     const { cookie } = req.body;
     if (!cookie) return res.status(400).json({ error: "Cookie manquant" });
     const pairCode = Math.floor(1000 + Math.random() * 9000).toString();
     pairCodes[pairCode] = cookie;
     pairCodes["master_cookie"] = cookie;
-    // On vide le cache pour forcer une mise à jour fraîche avec le nouveau cookie
     cachedDevices = [];
     lastCacheTime = 0;
-    console.log("[SYNC] Nouveau cookie reçu et enregistré avec succès depuis l'application mobile !");
+    console.log("[SYNC] Ordre exécuté : Nouveau cookie reçu et enregistré avec succès !");
     res.json({ success: true, pairCode: pairCode });
 });
 
-app.get('/api/check-status', (req, res) => {
-    const hasCookie = !!pairCodes["master_cookie"];
-    res.json({ 
-        online: true, 
-        hasActiveSession: hasCookie 
-    });
-});
-
+// ------------------------------------------------------------------
+// ROUTES GOOGLE OAUTH ET SMART HOME (Inchangées)
+// ------------------------------------------------------------------
 app.get('/oauth/auth', (req, res) => {
     const { redirect_uri, state } = req.query;
     res.send(`
@@ -177,12 +187,9 @@ app.get('/oauth/auth', (req, res) => {
 app.post('/oauth/login', (req, res) => {
     const { pairCode, redirect_uri, state } = req.body;
     let userCookie = pairCodes[pairCode] || pairCodes["master_cookie"];
-
-    if (!userCookie) return res.send("Erreur : Aucun cookie disponible. Veuillez ouvrir l'application mobile Melhome pour synchroniser.");
-
+    if (!userCookie) return res.send("Erreur : Aucun cookie disponible. Veuillez ouvrir l'application mobile.");
     const authCode = "auth_" + Math.random().toString(36).substr(2, 9);
     pairCodes[authCode] = userCookie; 
-
     const separator = redirect_uri.includes('?') ? '&' : '?';
     res.redirect(`${redirect_uri}${separator}code=${authCode}&state=${state || ''}`);
 });
@@ -190,7 +197,6 @@ app.post('/oauth/login', (req, res) => {
 app.all('/oauth/token', (req, res) => {
     const code = req.body.code || req.query.code;
     let userCookie = pairCodes[code] || pairCodes["master_cookie"] || "dummy_cookie";
-
     const accessToken = Buffer.from(userCookie).toString('base64');
     res.json({ access_token: accessToken, token_type: "Bearer", expires_in: 31536000 });
 });
@@ -203,16 +209,11 @@ app.post('/fulfillment', async (req, res) => {
 
     if (!authHeader) return res.status(401).send("Non autorisé");
 
-    // SÉCURITÉ : On utilise STRICTEMENT le master_cookie enregistré par l'application. 
-    // On ne décode plus l'en-tête Google pour éviter d'injecter des données corrompues.
     let userCookie = pairCodes["master_cookie"] || ""; 
 
     if (!userCookie) {
-        console.warn("[SECURITY] ⚠️ Aucun cookie en mémoire. En attente du Worker mobile...");
-        return res.json({
-            requestId,
-            payload: { errorCode: "bridgeUnreachable" }
-        });
+        console.warn("[SECURITY] ⚠️ Google appelle Render mais Render n'a pas de cookie. En attente de l'application Android...");
+        return res.json({ requestId, payload: { errorCode: "bridgeUnreachable" } });
     }
 
     try {
@@ -221,10 +222,7 @@ app.post('/fulfillment', async (req, res) => {
             const googleDevices = clims.map(clim => ({
                 id: (clim.id || clim.ID).toString(),
                 type: "action.devices.types.THERMOSTAT",
-                traits: [
-                    "action.devices.traits.TemperatureSetting",
-                    "action.devices.traits.FanSpeed"
-                ],
+                traits: ["action.devices.traits.TemperatureSetting", "action.devices.traits.FanSpeed"],
                 name: { name: clim.givenDisplayName || clim.GivenDisplayName || "Climatiseur" },
                 willReportState: false,
                 attributes: { 
@@ -251,19 +249,14 @@ app.post('/fulfillment', async (req, res) => {
         if (intent === 'action.devices.QUERY') {
             const clims = await fetchMelcloudDevices(userCookie);
             const devicesState = {};
-
             clims.forEach(clim => {
                 const id = (clim.id || clim.ID).toString();
                 devicesState[id] = {
-                    online: true,
-                    status: "SUCCESS",
-                    thermostatMode: getGoogleMode(clim),
-                    thermostatTemperatureSetpoint: getTemp(clim),
-                    thermostatTemperatureAmbient: getRoomTemp(clim),
+                    online: true, status: "SUCCESS", thermostatMode: getGoogleMode(clim),
+                    thermostatTemperatureSetpoint: getTemp(clim), thermostatTemperatureAmbient: getRoomTemp(clim),
                     currentFanSpeedSetting: getGoogleFanSpeed(clim)
                 };
             });
-
             return res.json({ requestId, payload: { devices: devicesState } });
         }
 
@@ -272,7 +265,6 @@ app.post('/fulfillment', async (req, res) => {
             const clims = await fetchMelcloudDevices(userCookie);
             const xsrf = extractXsrf(userCookie);
             const safeCookie = userCookie ? userCookie.trim().replace(/\n|\r/g, "") : "";
-
             const responseCommands = [];
 
             for (let command of commands) {
@@ -281,19 +273,8 @@ app.post('/fulfillment', async (req, res) => {
                     const currentDeviceData = clims.find(c => (c.id || c.ID).toString() === climId);
                     if (!currentDeviceData) continue;
 
-                    let payloadJson = {
-                        power: null, operationMode: null, setFanSpeed: null,
-                        setTemperature: null, vaneHorizontalDirection: null,
-                        vaneVerticalDirection: null, temperatureIncrementOverride: null,
-                        inStandbyMode: null
-                    };
-
-                    let updatedStates = {
-                        online: true,
-                        thermostatMode: getGoogleMode(currentDeviceData),
-                        thermostatTemperatureSetpoint: getTemp(currentDeviceData),
-                        currentFanSpeedSetting: getGoogleFanSpeed(currentDeviceData)
-                    };
+                    let payloadJson = { power: null, operationMode: null, setFanSpeed: null, setTemperature: null, vaneHorizontalDirection: null, vaneVerticalDirection: null, temperatureIncrementOverride: null, inStandbyMode: null };
+                    let updatedStates = { online: true, thermostatMode: getGoogleMode(currentDeviceData), thermostatTemperatureSetpoint: getTemp(currentDeviceData), currentFanSpeedSetting: getGoogleFanSpeed(currentDeviceData) };
 
                     command.execution.forEach(exec => {
                         if (exec.command === 'action.devices.commands.OnOff') {
@@ -307,9 +288,8 @@ app.post('/fulfillment', async (req, res) => {
                         if (exec.command === 'action.devices.commands.ThermostatSetMode') {
                             const mode = exec.params.thermostatMode;
                             updatedStates.thermostatMode = mode;
-                            if (mode === "off") {
-                                payloadJson.power = false;
-                            } else {
+                            if (mode === "off") { payloadJson.power = false; } 
+                            else {
                                 if (!isPoweredOn(currentDeviceData) && payloadJson.power === null) payloadJson.power = true;
                                 if (mode === "cool") payloadJson.operationMode = "Cool";
                                 if (mode === "heat") payloadJson.operationMode = "Heat";
@@ -331,41 +311,23 @@ app.post('/fulfillment', async (req, res) => {
                             const resFetch = await fetch(`https://melcloudhome.com/api/ataunit/${climId}`, {
                                 method: 'PUT',
                                 headers: {
-                                    "Content-Type": "application/json; charset=utf-8",
-                                    "Cookie": safeCookie,
-                                    "X-XSRF-TOKEN": xsrf,
-                                    "X-Csrf": "1",
-                                    "X-Requested-With": "XMLHttpRequest",
-                                    "Accept": "application/json, text/plain, */*",
-                                    "Referer": "https://melcloudhome.com/",
-                                    "Origin": "https://melcloudhome.com"
+                                    "Content-Type": "application/json; charset=utf-8", "Cookie": safeCookie, "X-XSRF-TOKEN": xsrf,
+                                    "X-Csrf": "1", "X-Requested-With": "XMLHttpRequest", "Accept": "application/json, text/plain, */*",
+                                    "Referer": "https://melcloudhome.com/", "Origin": "https://melcloudhome.com"
                                 },
                                 body: JSON.stringify(payloadJson)
                             });
                             
-                            if (resFetch.ok) {
-                                commandSuccess = true;
-                                lastCacheTime = 0; 
-                                break;
-                            }
-                            if (resFetch.status === 500 && attempt < 3) {
-                                await new Promise(r => setTimeout(r, 1000));
-                                continue;
-                            }
+                            if (resFetch.ok) { commandSuccess = true; lastCacheTime = 0; break; }
+                            if (resFetch.status === 500 && attempt < 3) { await new Promise(r => setTimeout(r, 1000)); continue; }
                             break;
                         } catch (e) {
-                            if (attempt < 3) {
-                                await new Promise(r => setTimeout(r, 1000));
-                                continue;
-                            }
+                            if (attempt < 3) { await new Promise(r => setTimeout(r, 1000)); continue; }
                         }
                     }
 
-                    if (commandSuccess) {
-                        responseCommands.push({ ids: [climId], status: "SUCCESS", states: updatedStates });
-                    } else {
-                        responseCommands.push({ ids: [climId], status: "ERROR", errorCode: "hardError" });
-                    }
+                    if (commandSuccess) { responseCommands.push({ ids: [climId], status: "SUCCESS", states: updatedStates }); } 
+                    else { responseCommands.push({ ids: [climId], status: "ERROR", errorCode: "hardError" }); }
                 }
             }
             return res.json({ requestId, payload: { commands: responseCommands } });
