@@ -1,50 +1,14 @@
 const express = require('express');
-const fs = require('fs');
-const path = require('path');
-
 const app = express();
 const PORT = process.env.PORT || 10000;
 
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 
-// Fichier de persistance pour survivre aux redémarrages de Render
-const TOKEN_FILE = path.join('/tmp', 'melhome_token.json');
-
 let pairCodes = {}; 
-
-// Charger le cookie sauvegardé au démarrage s'il existe
-function loadPersistedCookie() {
-    try {
-        if (fs.existsSync(TOKEN_FILE)) {
-            const data = fs.readFileSync(TOKEN_FILE, 'utf8');
-            const json = JSON.parse(data);
-            if (json.cookie) {
-                pairCodes["master_cookie"] = json.cookie;
-                console.log("[STORAGE] Cookie persistant restauré avec succès depuis le disque.");
-            }
-        }
-    } catch (e) {
-        console.error("[STORAGE] Erreur lors de la lecture du cookie persistant:", e.message);
-    }
-}
-
-// Sauvegarder le cookie sur le disque
-function savePersistedCookie(cookie) {
-    try {
-        fs.writeFileSync(TOKEN_FILE, JSON.stringify({ cookie }), 'utf8');
-        console.log("[STORAGE] Cookie sauvegardé sur le disque.");
-    } catch (e) {
-        console.error("[STORAGE] Erreur lors de l'écriture du cookie:", e.message);
-    }
-}
-
-loadPersistedCookie();
-
-// --- SYSTÈME DE CACHE POUR ÉVITER LES TIMEOUTS GOOGLE HOME ---
 let cachedDevices = [];
 let lastCacheTime = 0;
-const CACHE_TTL = 30000; // 30 secondes de cache
+const CACHE_TTL = 30000; // 30 secondes
 
 function extractXsrf(cookieStr) {
     if (!cookieStr) return "1";
@@ -94,10 +58,8 @@ function getTemp(clim) {
 
 function getGoogleMode(clim) {
     if (!isPoweredOn(clim)) return "off"; 
-
     const val = getSetting(clim, ["operationMode", "OperationMode"]);
     const mode = String(val || "Automatic").toLowerCase();
-
     if (mode.includes("cool")) return "cool";
     if (mode.includes("heat")) return "heat";
     if (mode.includes("dry")) return "dry";
@@ -109,7 +71,6 @@ function getGoogleFanSpeed(clim) {
     const val = getSetting(clim, ["setFanSpeed", "SetFanSpeed", "fanSpeed", "FanSpeed"]);
     if (val === undefined || val === null) return "Auto";
     const str = String(val).toLowerCase();
-
     if (str.includes("one") || str === "1") return "One";
     if (str.includes("two") || str === "2") return "Two";
     if (str.includes("three") || str === "3") return "Three";
@@ -119,14 +80,13 @@ function getGoogleFanSpeed(clim) {
 }
 
 async function fetchMelcloudDevices(cookie) {
+    if (!cookie) {
+        throw new Error("COOKIE_MANQUANT_ATTENTE_MOBILE");
+    }
+
     const now = Date.now();
     if (cachedDevices.length > 0 && (now - lastCacheTime < CACHE_TTL)) {
         return cachedDevices;
-    }
-
-    if (!cookie) {
-        if (cachedDevices.length > 0) return cachedDevices;
-        throw new Error("Cookie manquant et aucun cache disponible.");
     }
 
     const xsrf = extractXsrf(cookie);
@@ -167,7 +127,6 @@ async function fetchMelcloudDevices(cookie) {
             
         } catch (error) {
             if (attempt === maxRetries) {
-                if (cachedDevices.length > 0) return cachedDevices;
                 throw error; 
             }
             await new Promise(res => setTimeout(res, 1000));
@@ -181,10 +140,7 @@ app.post('/api/save-cookie', (req, res) => {
     const pairCode = Math.floor(1000 + Math.random() * 9000).toString();
     pairCodes[pairCode] = cookie;
     pairCodes["master_cookie"] = cookie;
-    
-    // Sauvegarde immédiate sur le disque de Render
-    savePersistedCookie(cookie);
-
+    console.log("[SYNC] Nouveau cookie reçu et enregistré avec succès depuis l'application mobile !");
     res.json({ success: true, pairCode: pairCode });
 });
 
@@ -210,7 +166,7 @@ app.post('/oauth/login', (req, res) => {
     const { pairCode, redirect_uri, state } = req.body;
     let userCookie = pairCodes[pairCode] || pairCodes["master_cookie"];
 
-    if (!userCookie) return res.send("Erreur : Code invalide.");
+    if (!userCookie) return res.send("Erreur : Aucun cookie disponible. Veuillez ouvrir l'application mobile Melhome pour synchroniser.");
 
     const authCode = "auth_" + Math.random().toString(36).substr(2, 9);
     pairCodes[authCode] = userCookie; 
@@ -244,6 +200,17 @@ app.post('/fulfillment', async (req, res) => {
         } catch(e) {
             userCookie = "";
         }
+    }
+
+    // SI LE SERVEUR N'A PAS DE COOKIE (EX: APRÈS UN REBOOT)
+    if (!userCookie) {
+        console.warn("[SECURITY] ⚠️ Le serveur a redémarré et n'a aucun cookie en mémoire. En attente du Worker mobile...");
+        return res.json({
+            requestId,
+            payload: {
+                errorCode: "bridgeUnreachable" // Code propre pour indiquer à Google que le pont attend une synchro
+            }
+        });
     }
 
     try {
@@ -313,13 +280,9 @@ app.post('/fulfillment', async (req, res) => {
                     if (!currentDeviceData) continue;
 
                     let payloadJson = {
-                        power: null,
-                        operationMode: null,
-                        setFanSpeed: null,
-                        setTemperature: null,
-                        vaneHorizontalDirection: null,
-                        vaneVerticalDirection: null,
-                        temperatureIncrementOverride: null,
+                        power: null, operationMode: null, setFanSpeed: null,
+                        setTemperature: null, vaneHorizontalDirection: null,
+                        vaneVerticalDirection: null, temperatureIncrementOverride: null,
                         inStandbyMode: null
                     };
 
@@ -346,7 +309,7 @@ app.post('/fulfillment', async (req, res) => {
                                 payloadJson.power = false;
                             } else {
                                 if (!isPoweredOn(currentDeviceData) && payloadJson.power === null) payloadJson.power = true;
-                                if (mode === "cool") payloadJson.operationMode = "Cool";
+                                if (mode === "cool") payloadjson.operationMode = "Cool";
                                 if (mode === "heat") payloadJson.operationMode = "Heat";
                                 if (mode === "dry") payloadJson.operationMode = "Dry";
                                 if (mode === "fan-only") payloadJson.operationMode = "Fan";
@@ -383,7 +346,6 @@ app.post('/fulfillment', async (req, res) => {
                                 lastCacheTime = 0; 
                                 break;
                             }
-                            
                             if (resFetch.status === 500 && attempt < 3) {
                                 await new Promise(r => setTimeout(r, 1000));
                                 continue;
@@ -398,17 +360,9 @@ app.post('/fulfillment', async (req, res) => {
                     }
 
                     if (commandSuccess) {
-                        responseCommands.push({
-                            ids: [climId],
-                            status: "SUCCESS",
-                            states: updatedStates
-                        });
+                        responseCommands.push({ ids: [climId], status: "SUCCESS", states: updatedStates });
                     } else {
-                        responseCommands.push({
-                            ids: [climId],
-                            status: "ERROR",
-                            errorCode: "hardError"
-                        });
+                        responseCommands.push({ ids: [climId], status: "ERROR", errorCode: "hardError" });
                     }
                 }
             }
@@ -416,14 +370,6 @@ app.post('/fulfillment', async (req, res) => {
         }
     } catch (error) {
         console.error("Erreur d'exécution globale :", error);
-        if (cachedDevices.length > 0) {
-            const devicesState = {};
-            cachedDevices.forEach(clim => {
-                const id = (clim.id || clim.ID).toString();
-                devicesState[id] = { online: true, status: "SUCCESS", thermostatMode: getGoogleMode(clim), thermostatTemperatureSetpoint: getTemp(clim), thermostatTemperatureAmbient: getRoomTemp(clim), currentFanSpeedSetting: getGoogleFanSpeed(clim) };
-            });
-            return res.json({ requestId, payload: { devices: devicesState } });
-        }
         return res.json({ requestId, payload: { errorCode: "hardError" } });
     }
 });
