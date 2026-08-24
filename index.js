@@ -134,18 +134,20 @@ async function fetchMelcloudDevices(cookie) {
     }
 }
 
-// Route de synchronisation du cookie
+// Route de synchronisation du cookie par le Worker
 app.post('/api/save-cookie', (req, res) => {
     const { cookie } = req.body;
     if (!cookie) return res.status(400).json({ error: "Cookie manquant" });
     const pairCode = Math.floor(1000 + Math.random() * 9000).toString();
     pairCodes[pairCode] = cookie;
     pairCodes["master_cookie"] = cookie;
+    // On vide le cache pour forcer une mise à jour fraîche avec le nouveau cookie
+    cachedDevices = [];
+    lastCacheTime = 0;
     console.log("[SYNC] Nouveau cookie reçu et enregistré avec succès depuis l'application mobile !");
     res.json({ success: true, pairCode: pairCode });
 });
 
-// NOUVELLE ROUTE : Permet au Worker de vérifier si le serveur a redémarré ou perdu la mémoire
 app.get('/api/check-status', (req, res) => {
     const hasCookie = !!pairCodes["master_cookie"];
     res.json({ 
@@ -201,19 +203,12 @@ app.post('/fulfillment', async (req, res) => {
 
     if (!authHeader) return res.status(401).send("Non autorisé");
 
-    let userCookie = pairCodes["master_cookie"]; 
+    // SÉCURITÉ : On utilise STRICTEMENT le master_cookie enregistré par l'application. 
+    // On ne décode plus l'en-tête Google pour éviter d'injecter des données corrompues.
+    let userCookie = pairCodes["master_cookie"] || ""; 
 
     if (!userCookie) {
-        try {
-            userCookie = Buffer.from(authHeader.split(' ')[1], 'base64').toString('utf-8');
-            pairCodes["master_cookie"] = userCookie;
-        } catch(e) {
-            userCookie = "";
-        }
-    }
-
-    if (!userCookie) {
-        console.warn("[SECURITY] ⚠️ Le serveur n'a aucun cookie en mémoire. En attente du Worker mobile...");
+        console.warn("[SECURITY] ⚠️ Aucun cookie en mémoire. En attente du Worker mobile...");
         return res.json({
             requestId,
             payload: { errorCode: "bridgeUnreachable" }
