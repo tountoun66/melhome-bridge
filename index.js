@@ -134,6 +134,7 @@ async function fetchMelcloudDevices(cookie) {
     }
 }
 
+// Route de synchronisation du cookie
 app.post('/api/save-cookie', (req, res) => {
     const { cookie } = req.body;
     if (!cookie) return res.status(400).json({ error: "Cookie manquant" });
@@ -142,6 +143,15 @@ app.post('/api/save-cookie', (req, res) => {
     pairCodes["master_cookie"] = cookie;
     console.log("[SYNC] Nouveau cookie reçu et enregistré avec succès depuis l'application mobile !");
     res.json({ success: true, pairCode: pairCode });
+});
+
+// NOUVELLE ROUTE : Permet au Worker de vérifier si le serveur a redémarré ou perdu la mémoire
+app.get('/api/check-status', (req, res) => {
+    const hasCookie = !!pairCodes["master_cookie"];
+    res.json({ 
+        online: true, 
+        hasActiveSession: hasCookie 
+    });
 });
 
 app.get('/oauth/auth', (req, res) => {
@@ -202,14 +212,11 @@ app.post('/fulfillment', async (req, res) => {
         }
     }
 
-    // SI LE SERVEUR N'A PAS DE COOKIE (EX: APRÈS UN REBOOT)
     if (!userCookie) {
-        console.warn("[SECURITY] ⚠️ Le serveur a redémarré et n'a aucun cookie en mémoire. En attente du Worker mobile...");
+        console.warn("[SECURITY] ⚠️ Le serveur n'a aucun cookie en mémoire. En attente du Worker mobile...");
         return res.json({
             requestId,
-            payload: {
-                errorCode: "bridgeUnreachable" // Code propre pour indiquer à Google que le pont attend une synchro
-            }
+            payload: { errorCode: "bridgeUnreachable" }
         });
     }
 
@@ -309,7 +316,7 @@ app.post('/fulfillment', async (req, res) => {
                                 payloadJson.power = false;
                             } else {
                                 if (!isPoweredOn(currentDeviceData) && payloadJson.power === null) payloadJson.power = true;
-                                if (mode === "cool") payloadjson.operationMode = "Cool";
+                                if (mode === "cool") payloadJson.operationMode = "Cool";
                                 if (mode === "heat") payloadJson.operationMode = "Heat";
                                 if (mode === "dry") payloadJson.operationMode = "Dry";
                                 if (mode === "fan-only") payloadJson.operationMode = "Fan";
