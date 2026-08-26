@@ -1,3 +1,6 @@
+------abandoned project------
+
+
 ☁️ Melhome Bridge - Node.js Server (v1.1)
 This repository contains the source code for the backend server (the "bridge") of the Melhome project.
 
