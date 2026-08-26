@@ -7,16 +7,14 @@ const AUTHORIZE_URL = `${AUTH_BASE}/connect/authorize`;
 
 const CLIENT_ID = "homemobile";
 const REDIRECT_URI = "melcloudhome://";
+
 const SCOPES = "openid profile email offline_access IdentityServerApi";
 
-const USER_AGENT = "MonitorAndControl.App.Mobile/52 CFNetwork/3860.400.51 Darwin/25.3.0";
+const USER_AGENT =
+  "MonitorAndControl.App.Mobile/52 CFNetwork/3860.400.51 Darwin/25.3.0";
 
-// Code PIN pour l'association Google Home
+// Code PIN de sécurité pour l'association Google Home
 const GOOGLE_HOME_PIN = "1234";
-
-/* ============================================================
-   UTILITAIRES HTML & ENCODAGE
-   ============================================================ */
 
 function html(body, status = 200) {
   return new Response(
@@ -31,65 +29,412 @@ function html(body, status = 200) {
 ${body}
 </body>
 </html>`,
-    { status, headers: { "content-type": "text/html;charset=utf-8", "cache-control": "no-store" } }
+    {
+      status,
+      headers: {
+        "content-type": "text/html;charset=utf-8",
+        "cache-control": "no-store"
+      }
+    }
   );
+}
+
+function esc(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function mask(value) {
+  if (!value) return null;
+  const s = String(value);
+  if (s.length <= 8) return "***";
+  return `${s.slice(0, 4)}...${s.slice(-4)}`;
 }
 
 function b64url(bytes) {
   let s = "";
-  for (const b of bytes) s += String.fromCharCode(b);
-  return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+  for (const b of bytes) {
+    s += String.fromCharCode(b);
+  }
+  return btoa(s)
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/g, "");
 }
 
 /* ============================================================
-   GESTION BASE DE DONNÉES D1 (OAUTH)
+   D1 (BASE DE DONNÉES)
    ============================================================ */
 
 async function getOAuth(env) {
   if (!env.DB) throw new Error("Binding D1 'DB' absent");
-  return await env.DB.prepare("SELECT * FROM oauth_tokens ORDER BY updated_at DESC LIMIT 1").first();
+
+  return await env.DB
+    .prepare("SELECT * FROM oauth_tokens ORDER BY updated_at DESC LIMIT 1")
+    .first();
 }
 
 async function saveOAuth(env, tokens) {
   if (!env.DB) throw new Error("Binding D1 'DB' absent");
-  if (!tokens?.refresh_token) throw new Error("MELCloud n'a pas fourni de refresh_token");
-  
+
+  if (!tokens?.refresh_token) {
+    throw new Error("MELCloud n'a pas fourni de refresh_token");
+  }
+
   const now = Date.now();
   const expiresAt = tokens.expires_at || now + Number(tokens.expires_in || 3600) * 1000;
 
   await env.DB.prepare("DELETE FROM oauth_tokens").run();
+
   await env.DB.prepare(
-    `INSERT INTO oauth_tokens (id, access_token, refresh_token, expires_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)`
-  ).bind(crypto.randomUUID(), tokens.access_token || null, tokens.refresh_token, expiresAt, now, now).run();
+    `INSERT INTO oauth_tokens (id, access_token, refresh_token, expires_at, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?)`
+  )
+    .bind(
+      crypto.randomUUID(),
+      tokens.access_token || null,
+      tokens.refresh_token,
+      expiresAt,
+      now,
+      now
+    )
+    .run();
 }
 
 async function getValidAccessToken(env) {
   let oauth = await getOAuth(env);
   if (!oauth?.refresh_token) return null;
 
-  // Si expiré ou expire dans moins de 5 min, on rafraîchit
-  if (!oauth.expires_at || oauth.expires_at < Date.now() + 300000) {
+  const now = Date.now();
+  // Rafraîchissement si le token expire dans moins de 5 minutes
+  if (!oauth.expires_at || oauth.expires_at < now + 300000) {
     try {
-      const response = await fetch(TOKEN_URL, {
-        method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json", "User-Agent": USER_AGENT },
-        body: new URLSearchParams({ grant_type: "refresh_token", client_id: CLIENT_ID, refresh_token: oauth.refresh_token }).toString()
-      });
-      if (response.ok) {
-        const tokens = await response.json();
-        if (!tokens.refresh_token) tokens.refresh_token = oauth.refresh_token;
-        await saveOAuth(env, tokens);
-        return tokens.access_token;
-      }
+      oauth = await refreshToken(env, oauth);
     } catch (e) {
       console.error("Erreur de refresh token", e);
+      return null;
     }
   }
   return oauth.access_token;
 }
 
 /* ============================================================
-   MAPPERS MELCLOUD <-> GOOGLE HOME
+   COOKIE JAR & HTTP
+   ============================================================ */
+
+function addCookies(jar, response) {
+  let cookies = [];
+  try {
+    if (typeof response.headers.getSetCookie === "function") {
+      cookies = response.headers.getSetCookie();
+    }
+  } catch {}
+
+  if (!cookies.length) {
+    const raw = response.headers.get("set-cookie");
+    if (raw) cookies = raw.split(/,(?=\s*[^;,=\s]+=[^;,]+)/);
+  }
+
+  for (const cookie of cookies) {
+    const part = cookie.split(";", 1)[0];
+    const index = part.indexOf("=");
+    if (index <= 0) continue;
+    const name = part.slice(0, index).trim();
+    const value = part.slice(index + 1).trim();
+    jar.set(name, value);
+  }
+}
+
+function cookieHeader(jar) {
+  return [...jar].map(([name, value]) => `${name}=${value}`).join("; ");
+}
+
+async function requestWithCookies(url, init, jar) {
+  const headers = new Headers(init?.headers || {});
+  const cookies = cookieHeader(jar);
+  if (cookies) headers.set("Cookie", cookies);
+
+  const response = await fetch(url, { ...init, headers, redirect: "manual" });
+  addCookies(jar, response);
+  return response;
+}
+
+/* ============================================================
+   OAUTH EXTRACTION & FORM HTML
+   ============================================================ */
+
+function extractCode(value) {
+  if (!value) return null;
+  const match = String(value).match(/[?&]code=([^&\s"'<>]+)/i);
+  if (!match) return null;
+  try { return decodeURIComponent(match[1]); } catch { return match[1]; }
+}
+
+function extractForm(body, baseUrl) {
+  if (!body) return null;
+  const match = String(body).match(/<form[^>]*action=["']([^"']+)["'][^>]*>([\s\S]*?)<\/form>/i);
+  if (!match) return null;
+
+  const rawAction = match[1].replace(/&amp;/g, "&");
+  const action = new URL(rawAction, baseUrl).toString();
+  const data = new URLSearchParams();
+
+  const inputs = match[2].matchAll(/<input[^>]*>/gi);
+  for (const item of inputs) {
+    const tag = item[0];
+    const name = tag.match(/name=["']([^"']+)["']/i)?.[1];
+    const value = tag.match(/value=["']([^"']*)["']/i)?.[1] ?? "";
+    if (name) data.set(name, value);
+  }
+  return { action, data };
+}
+
+async function diagnosticRequest(url, init, jar, diagnostics) {
+  const response = await requestWithCookies(url, init, jar);
+  diagnostics.push({
+    url: maskUrl(url),
+    method: init?.method || "GET",
+    status: response.status,
+    contentType: response.headers.get("content-type"),
+    location: maskUrl(response.headers.get("location")),
+    setCookie: !!response.headers.get("set-cookie")
+  });
+  return response;
+}
+
+function maskUrl(value) {
+  if (!value) return null;
+  try {
+    const url = new URL(value);
+    const sensitive = ["code", "state", "nonce", "request_uri", "code_challenge", "code_verifier", "id_token", "access_token", "refresh_token"];
+    for (const key of sensitive) {
+      if (url.searchParams.has(key)) url.searchParams.set(key, "***");
+    }
+    return url.toString();
+  } catch {
+    return String(value).replace(/([?&](?:code|state|nonce|request_uri|code_challenge|code_verifier|access_token|refresh_token)=)[^&]+/gi, "$1***");
+  }
+}
+
+/* ============================================================
+   LOGIN & REDIRECT FLOW
+   ============================================================ */
+
+async function followOAuth(startUrl, jar, diagnostics, max = 20) {
+  let currentUrl = startUrl;
+  let init = {
+    method: "GET",
+    headers: {
+      "User-Agent": USER_AGENT,
+      Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+    }
+  };
+
+  for (let i = 0; i < max; i++) {
+    const response = await diagnosticRequest(currentUrl, init, jar, diagnostics);
+    const location = response.headers.get("location");
+
+    if (location) {
+      const nextUrl = new URL(location, currentUrl).toString();
+
+      if (/^melcloud(?:home)?:\/\//i.test(nextUrl)) {
+        return { url: nextUrl, response };
+      }
+
+      currentUrl = nextUrl;
+      init = { method: "GET", headers: { "User-Agent": USER_AGENT, Accept: "text/html,application/xhtml+xml" } };
+      continue;
+    }
+
+    const body = await response.text();
+    const code = extractCode(currentUrl) || extractCode(body);
+    if (code) return { url: currentUrl, response, body };
+
+    try {
+      const parsedUrl = new URL(currentUrl);
+      if (parsedUrl.pathname.toLowerCase() === "/redirect") {
+        const redirectUri = parsedUrl.searchParams.get("RedirectUri");
+        if (redirectUri) {
+          currentUrl = new URL(redirectUri, currentUrl).toString();
+          init = { method: "GET", headers: { "User-Agent": USER_AGENT, Accept: "text/html,application/xhtml+xml" } };
+          continue;
+        }
+      }
+    } catch {}
+
+    const metaMatch = body.match(/content=["'][0-9]+;\s*url=["']?([^"'>]+)["']?/i);
+    if (metaMatch) {
+      const rawNext = metaMatch[1].replace(/&amp;/g, "&");
+      currentUrl = new URL(rawNext, currentUrl).toString();
+      init = { method: "GET", headers: { "User-Agent": USER_AGENT, Accept: "text/html,application/xhtml+xml" } };
+      continue;
+    }
+
+    const form = extractForm(body, currentUrl);
+    if (form) {
+      if (currentUrl.includes("amazoncognito.com")) {
+        return { url: currentUrl, response, body };
+      }
+      currentUrl = form.action;
+      init = {
+        method: "POST",
+        headers: { "User-Agent": USER_AGENT, "Content-Type": "application/x-www-form-urlencoded", Referer: currentUrl, Accept: "text/html,application/xhtml+xml" },
+        body: form.data.toString()
+      };
+      continue;
+    }
+
+    return { url: currentUrl, response, body };
+  }
+  throw new Error("Trop de redirections MELCloud");
+}
+
+async function loginToMelcloud(email, password, diagnostics) {
+  const jar = new Map();
+
+  /* PKCE */
+  const verifierBytes = crypto.getRandomValues(new Uint8Array(32));
+  const verifier = b64url(verifierBytes);
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier));
+  const challenge = b64url(new Uint8Array(digest));
+  const state = b64url(crypto.getRandomValues(new Uint8Array(16)));
+
+  /* PAR */
+  const par = await diagnosticRequest(
+    PAR_URL,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json", "User-Agent": USER_AGENT },
+      body: new URLSearchParams({
+        response_type: "code", state, code_challenge: challenge, code_challenge_method: "S256", client_id: CLIENT_ID, scope: SCOPES, redirect_uri: REDIRECT_URI
+      }).toString()
+    },
+    jar, diagnostics
+  );
+
+  const parText = await par.text();
+  if (!par.ok) throw new Error(`MELCloud PAR HTTP ${par.status}: ${parText.slice(0, 300)}`);
+
+  let parData;
+  try { parData = JSON.parse(parText); } catch { throw new Error("Réponse PAR MELCloud invalide"); }
+  if (!parData.request_uri) throw new Error("MELCloud n'a pas fourni de request_uri");
+
+  /* AUTHORIZE */
+  const authorizeUrl = `${AUTHORIZE_URL}?client_id=${encodeURIComponent(CLIENT_ID)}&request_uri=${encodeURIComponent(parData.request_uri)}`;
+  let result = await followOAuth(authorizeUrl, jar, diagnostics);
+  
+  let host = "";
+  try { host = new URL(result.url).hostname.toLowerCase(); } catch {}
+
+  if (!extractCode(result.url) && host.includes("amazoncognito.com")) {
+    const body = result.body ?? await result.response.text();
+    const form = extractForm(body, result.url);
+
+    const fieldNames = [];
+    if (form) {
+      for (const key of form.data.keys()) fieldNames.push(key);
+    }
+
+    diagnostics.push({
+      type: "cognito_login_form",
+      formAction: form ? maskUrl(form.action) : null,
+      fields: fieldNames.map(name => name.toLowerCase().includes("password") ? "password" : name.toLowerCase().includes("user") ? "username" : name)
+    });
+
+    if (!form) throw new Error("Cognito n'a pas fourni de formulaire de connexion exploitable");
+
+    const usernameField = [...form.data.keys()].find(key => /^(username|email|login)$/i.test(key));
+    const passwordField = [...form.data.keys()].find(key => /password/i.test(key));
+
+    if (!usernameField || !passwordField) {
+      throw new Error(`Formulaire Cognito inattendu. Champs détectés : ${fieldNames.join(", ")}`);
+    }
+
+    form.data.set(usernameField, email);
+    form.data.set(passwordField, password);
+
+    const login = await diagnosticRequest(
+      form.action,
+      {
+        method: "POST",
+        headers: {
+          "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/22F76",
+          "Content-Type": "application/x-www-form-urlencoded",
+          Origin: `https://${host}`,
+          Referer: result.url,
+          Accept: "text/html,application/xhtml+xml,application/xml"
+        },
+        body: form.data.toString()
+      },
+      jar, diagnostics
+    );
+
+    const location = login.headers.get("location");
+    if (location) {
+      result = await followOAuth(new URL(location, result.url).toString(), jar, diagnostics);
+    } else {
+      const body2 = await login.text();
+      const code = extractCode(body2);
+      if (code) {
+        result = { url: `${REDIRECT_URI}?code=${encodeURIComponent(code)}` };
+      } else {
+        const form2 = extractForm(body2, form.action);
+        if (form2) result = await followOAuth(form2.action, jar, diagnostics);
+      }
+    }
+  }
+
+  /* CODE -> TOKEN */
+  const authorizationCode = extractCode(result.url) || extractCode(result.body);
+  if (!authorizationCode) throw new Error("MELCloud n'a pas renvoyé de code OAuth");
+
+  const tokenResponse = await diagnosticRequest(
+    TOKEN_URL,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json", "User-Agent": USER_AGENT },
+      body: new URLSearchParams({
+        grant_type: "authorization_code", code: authorizationCode, redirect_uri: REDIRECT_URI, code_verifier: verifier, client_id: CLIENT_ID
+      }).toString()
+    },
+    jar, diagnostics
+  );
+
+  const tokenText = await tokenResponse.text();
+  if (!tokenResponse.ok) throw new Error(`Échange OAuth HTTP ${tokenResponse.status}: ${tokenText.slice(0, 300)}`);
+
+  let tokens;
+  try { tokens = JSON.parse(tokenText); } catch { throw new Error("Réponse token MELCloud invalide"); }
+  if (!tokens.refresh_token) throw new Error("MELCloud n'a pas fourni de refresh_token");
+
+  return tokens;
+}
+
+async function refreshToken(env, row) {
+  if (!row?.refresh_token) throw new Error("Aucun refresh_token MELCloud enregistré");
+
+  const response = await fetch(TOKEN_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json", "User-Agent": USER_AGENT },
+    body: new URLSearchParams({ grant_type: "refresh_token", client_id: CLIENT_ID, refresh_token: row.refresh_token }).toString()
+  });
+
+  const text = await response.text();
+  if (!response.ok) throw new Error(`Refresh MELCloud HTTP ${response.status}: ${text.slice(0, 300)}`);
+
+  const tokens = JSON.parse(text);
+  if (!tokens.refresh_token) tokens.refresh_token = row.refresh_token;
+
+  await saveOAuth(env, tokens);
+  return tokens;
+}
+
+/* ============================================================
+   GOOGLE HOME MAPPERS (Depuis votre Node.js)
    ============================================================ */
 
 function getSetting(clim, keys) {
@@ -152,7 +497,7 @@ function getGoogleFanSpeed(clim) {
 }
 
 /* ============================================================
-   WORKER PRINCIPAL
+   WORKER PRINCIPAL (ROUTER)
    ============================================================ */
 
 export default {
@@ -161,7 +506,7 @@ export default {
 
     try {
       /* ============================================================
-         INTERFACE UTILISATEUR (DASHBOARD)
+         INTERFACE UTILISATEUR & LOGIN
          ============================================================ */
       if (request.method === "GET" && url.pathname === "/") {
         const oauth = await getOAuth(env);
@@ -170,44 +515,72 @@ export default {
 <p>Token MELCloud : <b>${oauth?.refresh_token ? "✅ CONNECTÉ" : "❌ ABSENT"}</b></p>
 <div style="display:flex;gap:15px;margin-top:20px;">
   <a href="/setup" style="padding:10px 15px;background:#eee;text-decoration:none;border-radius:5px;color:black;">🔐 Configurer MELCloud</a>
-  <a href="/devices" style="padding:10px 15px;background:#005cff;text-decoration:none;border-radius:5px;color:white;font-weight:bold;">🌡️ Tester API JSON</a>
+  <a href="/devices" style="padding:10px 15px;background:#005cff;text-decoration:none;border-radius:5px;color:white;font-weight:bold;">🌡️ Tester les Clims</a>
 </div>
 `);
       }
 
+      if (request.method === "GET" && url.pathname === "/setup") {
+        const oauth = await getOAuth(env);
+        return html(`
+<h1>🔐 Connexion MELCloud</h1>
+<p>État : <b>${oauth?.refresh_token ? "TOKEN ENREGISTRÉ" : "NON CONNECTÉ"}</b></p>
+<form method="post">
+<input name="email" type="email" autocomplete="username" placeholder="E-mail" required style="width:100%;padding:10px"><br><br>
+<input name="password" type="password" autocomplete="current-password" placeholder="Mot de passe" required style="width:100%;padding:10px"><br><br>
+<button style="padding:12px 20px">Se connecter</button>
+</form>
+<p style="font-size:13px;color:#666">Le mot de passe est utilisé uniquement pour cette tentative et n'est pas enregistré.</p>
+`);
+      }
+
+      if (request.method === "POST" && url.pathname === "/setup") {
+        const form = await request.formData();
+        const email = String(form.get("email") || "").trim();
+        const password = String(form.get("password") || "");
+
+        if (!email || !password) return html("<h1>❌ Identifiants manquants</h1>", 400);
+
+        const diagnostics = [];
+        try {
+          const tokens = await loginToMelcloud(email, password, diagnostics);
+          await saveOAuth(env, tokens);
+          return html(`<h1>✅ Token MELCloud récupéré</h1><p>Le refresh_token est enregistré dans D1.</p><p><a href="/devices">🌡️ Tester la connexion aux clims</a></p>`);
+        } catch (error) {
+          console.error("[MELHOME OAuth]", error);
+          return html(`<h1>❌ Connexion impossible</h1><pre style="white-space:pre-wrap;background:#f5f5f5;padding:15px;overflow:auto">${esc(error?.message || String(error))}</pre><h3>Diagnostic</h3><pre style="white-space:pre-wrap;background:#f5f5f5;padding:15px;overflow:auto">${esc(JSON.stringify(diagnostics, null, 2))}</pre><p><a href="/setup">Réessayer</a></p>`, 400);
+        }
+      }
+
       /* ============================================================
-         TEST API (Vérification des clims)
+         TEST DE L'API MELCLOUD
          ============================================================ */
       if (request.method === "GET" && url.pathname === "/devices") {
         const token = await getValidAccessToken(env);
         if (!token) return html(`<h1>❌ Non connecté à MELCloud</h1><p><a href="/setup">Se connecter</a></p>`);
         
-        // URL vérifiée depuis le code source Node.js !
-        const apiResponse = await fetch("https://melcloudhome.com/api/user/context", {
-          headers: { "Authorization": `Bearer ${token}`, "Accept": "application/json" }
-        });
-        
-        const data = await apiResponse.json();
-        const units = data.buildings?.[0]?.airToAirUnits || [];
-        
-        return html(`
-<h1>🌡️ Mes Climatiseurs (MELCloud)</h1>
-<pre style="background:#e8f5e9;padding:15px;border-radius:4px;overflow:auto;border:1px solid #c8e6c9;">
-${JSON.stringify(units, null, 2)}
-</pre>
-<p><a href="/">⬅️ Retour</a></p>
-`);
+        try {
+          const apiResponse = await fetch("https://melcloudhome.com/api/user/context", {
+            headers: { "Authorization": `Bearer ${token}`, "Accept": "application/json" }
+          });
+          const data = await apiResponse.json();
+          const units = data.buildings?.[0]?.airToAirUnits || [];
+          
+          return html(`
+<h1>🌡️ Mes Climatiseurs (JSON)</h1>
+<pre style="background:#e8f5e9;padding:15px;border-radius:4px;overflow:auto;border:1px solid #c8e6c9;">${JSON.stringify(units, null, 2)}</pre>
+<p><a href="/">⬅️ Retour</a></p>`);
+        } catch (err) {
+          return html(`<h1>❌ Erreur API</h1><pre style="background:#ffebee;padding:15px;color:#c62828;">${err.message}</pre>`, 500);
+        }
       }
 
       /* ============================================================
-         GOOGLE HOME : OAUTH LINKING
+         GOOGLE HOME : ASSOCIATION OAUTH
          ============================================================ */
-         
-      // 1. Google Home affiche cette page à l'utilisateur
       if (request.method === "GET" && url.pathname === "/google/auth") {
         const redirectUri = url.searchParams.get("redirect_uri") || "";
         const state = url.searchParams.get("state") || "";
-        
         return html(`
 <div style="text-align:center; margin-top:50px;">
   <h2>Associer MELHome à Google Home</h2>
@@ -217,13 +590,11 @@ ${JSON.stringify(units, null, 2)}
     <p>Code PIN de sécurité :</p>
     <input type="password" name="pin" placeholder="Code PIN" style="padding:10px;font-size:20px;text-align:center;width:150px;letter-spacing:3px" required />
     <br><br>
-    <button type="submit" style="padding:12px 24px;background:#005cff;color:white;border:none;border-radius:5px;font-size:16px;">Associer</button>
+    <button type="submit" style="padding:12px 24px;background:#005cff;color:white;border:none;border-radius:5px;font-size:16px;cursor:pointer;">Associer</button>
   </form>
-</div>
-`);
+</div>`);
       }
 
-      // 2. Traitement du formulaire et redirection vers Google
       if (request.method === "POST" && url.pathname === "/google/login") {
         const formData = await request.formData();
         const pin = formData.get("pin");
@@ -233,45 +604,33 @@ ${JSON.stringify(units, null, 2)}
         if (pin !== GOOGLE_HOME_PIN) {
           return html(`<h2 style="color:red;text-align:center">Code PIN incorrect</h2><p style="text-align:center"><a href="javascript:history.back()">Réessayer</a></p>`);
         }
-
         const authCode = `ghome_${crypto.randomUUID()}`;
         const separator = redirect_uri.includes("?") ? "&" : "?";
         return Response.redirect(`${redirect_uri}${separator}code=${authCode}&state=${encodeURIComponent(state)}`, 302);
       }
 
-      // 3. Google demande un Access Token avec le code généré
       if ((request.method === "POST" || request.method === "GET") && url.pathname === "/google/token") {
-        // Pour une intégration perso, on valide tout et on donne un faux token permanent
-        // (Le vrai contrôle d'accès se fera via le Worker avec la DB D1)
-        return Response.json({
-          access_token: "melhome-google-permanent-token",
-          token_type: "Bearer",
-          expires_in: 31536000 // 1 an
-        });
+        return Response.json({ access_token: "melhome-google-permanent-token", token_type: "Bearer", expires_in: 31536000 });
       }
 
       /* ============================================================
-         GOOGLE HOME : FULFILLMENT (SYNC, QUERY, EXECUTE)
+         GOOGLE HOME : FULFILLMENT (Piloter les clims)
          ============================================================ */
       if (request.method === "POST" && url.pathname === "/google/fulfillment") {
         const body = await request.json();
         const requestId = body.requestId;
         const intent = body.inputs?.[0]?.intent;
         
-        // On vérifie que Google Home est bien connecté à MELCloud avant de répondre
         const melToken = await getValidAccessToken(env);
-        if (!melToken) {
-           return Response.json({ requestId, payload: { errorCode: "authFailure" } });
-        }
+        if (!melToken) return Response.json({ requestId, payload: { errorCode: "authFailure" } });
 
-        // --- FETCH DEVICES (Commun pour SYNC, QUERY et EXECUTE) ---
         const apiResponse = await fetch("https://melcloudhome.com/api/user/context", {
           headers: { "Authorization": `Bearer ${melToken}`, "Accept": "application/json" }
         });
         const contextData = await apiResponse.json();
         const clims = contextData.buildings?.[0]?.airToAirUnits || [];
 
-        // --- INTENT : SYNC ---
+        /* -- SYNC -- */
         if (intent === "action.devices.SYNC") {
           const googleDevices = clims.map(clim => ({
             id: String(clim.id ?? clim.ID),
@@ -300,24 +659,20 @@ ${JSON.stringify(units, null, 2)}
           return Response.json({ requestId, payload: { agentUserId: "melhome_user", devices: googleDevices } });
         }
 
-        // --- INTENT : QUERY ---
+        /* -- QUERY -- */
         if (intent === "action.devices.QUERY") {
           const devicesState = {};
           clims.forEach(clim => {
             const id = String(clim.id ?? clim.ID);
             devicesState[id] = {
-              online: true,
-              status: "SUCCESS",
-              thermostatMode: getGoogleMode(clim),
-              thermostatTemperatureSetpoint: getTemp(clim),
-              thermostatTemperatureAmbient: getRoomTemp(clim),
-              currentFanSpeedSetting: getGoogleFanSpeed(clim)
+              online: true, status: "SUCCESS", thermostatMode: getGoogleMode(clim),
+              thermostatTemperatureSetpoint: getTemp(clim), thermostatTemperatureAmbient: getRoomTemp(clim), currentFanSpeedSetting: getGoogleFanSpeed(clim)
             };
           });
           return Response.json({ requestId, payload: { devices: devicesState } });
         }
 
-        // --- INTENT : EXECUTE ---
+        /* -- EXECUTE -- */
         if (intent === "action.devices.EXECUTE") {
           const commands = body.inputs?.[0]?.payload?.commands || [];
           const responseCommands = [];
@@ -329,16 +684,13 @@ ${JSON.stringify(units, null, 2)}
               if (!currentDeviceData) continue;
 
               const payloadJson = {
-                power: null, operationMode: null, setFanSpeed: null,
-                setTemperature: null, vaneHorizontalDirection: null,
-                vaneVerticalDirection: null, temperatureIncrementOverride: null, inStandbyMode: null
+                power: null, operationMode: null, setFanSpeed: null, setTemperature: null,
+                vaneHorizontalDirection: null, vaneVerticalDirection: null, temperatureIncrementOverride: null, inStandbyMode: null
               };
 
               const updatedStates = {
-                online: true,
-                thermostatMode: getGoogleMode(currentDeviceData),
-                thermostatTemperatureSetpoint: getTemp(currentDeviceData),
-                currentFanSpeedSetting: getGoogleFanSpeed(currentDeviceData)
+                online: true, thermostatMode: getGoogleMode(currentDeviceData),
+                thermostatTemperatureSetpoint: getTemp(currentDeviceData), currentFanSpeedSetting: getGoogleFanSpeed(currentDeviceData)
               };
 
               for (const exec of command.execution || []) {
@@ -369,7 +721,6 @@ ${JSON.stringify(units, null, 2)}
                 }
               }
 
-              // Envoi de la commande PUT à MELCloud
               const execRes = await fetch(`https://melcloudhome.com/api/ataunit/${encodeURIComponent(climId)}`, {
                 method: "PUT",
                 headers: { "Content-Type": "application/json", "Authorization": `Bearer ${melToken}` },
@@ -386,11 +737,6 @@ ${JSON.stringify(units, null, 2)}
           return Response.json({ requestId, payload: { commands: responseCommands } });
         }
       }
-
-      /* Les routes Setup et le scraper Cognito qui étaient là restent inchangées, 
-         elles ont juste été masquées ici par soucis de lisibilité, 
-         mais vous DEVEZ garder vos fonctions de setup Cognito intactes dans le fichier final. */
-         
       return new Response("Not found", { status: 404 });
     } catch (error) {
       console.error("[WORKER ERROR]", error);
